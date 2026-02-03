@@ -1,0 +1,90 @@
+﻿Analyzing flu_app...                                            
+
+   info - Don't invoke 'print' in production code - lib\core\services\analytics_service.dart:54:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\core\services\analytics_service.dart:65:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\core\services\analytics_service.dart:76:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\core\services\database_service.dart:1055:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\core\services\excel_export_service.dart:102:7 - avoid_print
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\core\services\oem_battery_helper.dart:204:39 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\core\services\oem_battery_helper.dart:245:63 - deprecated_member_use
+   info - Don't use 'BuildContext's across async gaps - lib\features\backup\screens\backup_screen.dart:188:7 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps - lib\features\backup\screens\backup_screen.dart:243:30 - use_build_context_synchronously
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\calendar\screens\alarm_full_screen.dart:517:41 - deprecated_member_use
+   info - Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check - lib\features\calendar\screens\schedule_detail_screen.dart:667:31 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check - lib\features\calendar\screens\schedule_detail_screen.dart:668:31 - use_build_context_synchronously
+   info - 'value' is deprecated and shouldn't be used. Use component accessors like .r or .g, or toARGB32 for an explicit conversion - lib\features\customer_management\screens\add_borrower_screen.dart:277:60 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customer_management\screens\add_borrower_screen.dart:733:44 - deprecated_member_use
+   info - Don't use 'BuildContext's across async gaps - lib\features\customer_management\screens\customer_detail_screen.dart:85:62 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps - lib\features\customer_management\screens\customer_detail_screen.dart:1862:40 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check - lib\features\customer_management\screens\customer_detail_screen.dart:1869:40 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps - lib\features\customer_management\screens\customer_detail_screen.dart:1950:38 - use_build_context_synchronously
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:102:44 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:117:46 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:145:32 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:300:45 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:520:48 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:522:67 - deprecated_member_use
+   info - Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check - lib\features\customers\screens\customer_groups_screen.dart:557:40 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check - lib\features\customers\screens\customer_groups_screen.dart:566:40 - use_build_context_synchronously
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:766:32 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:774:39 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:785:35 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:814:41 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:822:43 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:845:39 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:862:46 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:895:53 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:1040:57 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:1049:57 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\customers\screens\customer_groups_screen.dart:1186:69 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\home\screens\home_screen.dart:831:83 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\home\screens\home_screen.dart:840:83 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\home\screens\home_screen.dart:902:38 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\home\widgets\sidebar_menu.dart:144:34 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\home\widgets\sidebar_menu.dart:167:36 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\home\widgets\sidebar_menu.dart:190:36 - deprecated_member_use
+   info - Don't use 'BuildContext's across async gaps - lib\features\loans\screens\loan_details_screen_new.dart:971:40 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check - lib\features\loans\screens\loan_details_screen_new.dart:978:40 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps - lib\features\loans\screens\loan_details_screen_new.dart:1065:38 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check - lib\features\payments\screens\payment_history_screen.dart:199:42 - use_build_context_synchronously
+   info - Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check - lib\features\payments\screens\payment_history_screen.dart:208:42 - use_build_context_synchronously
+   info - 'groupValue' is deprecated and shouldn't be used. Use a RadioGroup ancestor to manage group value instead. This feature was deprecated after v3.32.0-0.0.pre - lib\features\settings\screens\settings_screen.dart:433:17 - deprecated_member_use
+   info - 'onChanged' is deprecated and shouldn't be used. Use RadioGroup to handle value change instead. This feature was deprecated after v3.32.0-0.0.pre - lib\features\settings\screens\settings_screen.dart:434:17 - deprecated_member_use
+   info - 'groupValue' is deprecated and shouldn't be used. Use a RadioGroup ancestor to manage group value instead. This feature was deprecated after v3.32.0-0.0.pre - lib\features\settings\screens\settings_screen.dart:443:17 - deprecated_member_use
+   info - 'onChanged' is deprecated and shouldn't be used. Use RadioGroup to handle value change instead. This feature was deprecated after v3.32.0-0.0.pre - lib\features\settings\screens\settings_screen.dart:444:17 - deprecated_member_use
+   info - 'groupValue' is deprecated and shouldn't be used. Use a RadioGroup ancestor to manage group value instead. This feature was deprecated after v3.32.0-0.0.pre - lib\features\settings\screens\settings_screen.dart:453:17 - deprecated_member_use
+   info - 'onChanged' is deprecated and shouldn't be used. Use RadioGroup to handle value change instead. This feature was deprecated after v3.32.0-0.0.pre - lib\features\settings\screens\settings_screen.dart:454:17 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\settings\screens\settings_screen.dart:593:42 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\settings\screens\settings_screen.dart:595:61 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\settings\screens\settings_screen.dart:616:41 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\settings\screens\settings_screen.dart:621:43 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\settings\screens\settings_screen.dart:622:37 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\settings\screens\settings_screen.dart:832:39 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\settings\screens\settings_screen.dart:988:45 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\features\settings\screens\settings_screen.dart:989:45 - deprecated_member_use
+   info - 'groupValue' is deprecated and shouldn't be used. Use a RadioGroup ancestor to manage group value instead. This feature was deprecated after v3.32.0-0.0.pre - lib\features\settings\screens\settings_screen.dart:1369:15 - deprecated_member_use
+   info - 'onChanged' is deprecated and shouldn't be used. Use RadioGroup to handle value change instead. This feature was deprecated after v3.32.0-0.0.pre - lib\features\settings\screens\settings_screen.dart:1370:15 - deprecated_member_use
+   info - 'groupValue' is deprecated and shouldn't be used. Use a RadioGroup ancestor to manage group value instead. This feature was deprecated after v3.32.0-0.0.pre - lib\features\settings\screens\settings_screen.dart:1389:15 - deprecated_member_use
+   info - 'onChanged' is deprecated and shouldn't be used. Use RadioGroup to handle value change instead. This feature was deprecated after v3.32.0-0.0.pre - lib\features\settings\screens\settings_screen.dart:1390:15 - deprecated_member_use
+   info - Don't use 'BuildContext's across async gaps - lib\features\transactions\screens\transaction_summary_screen.dart:1190:7 - use_build_context_synchronously
+   info - 'textScaleFactorOf' is deprecated and shouldn't be used. Use textScalerOf instead. Use of textScaleFactor was deprecated in preparation for the upcoming nonlinear text scaling support. This feature was deprecated after v3.12.0-2.0.pre - lib\shared\utils\responsive_utils.dart:68:40 - deprecated_member_use
+   info - Use an initializing formal to assign a parameter to a field - lib\shared\utils\responsive_utils.dart:406:9 - prefer_initializing_formals
+   info - Use an initializing formal to assign a parameter to a field - lib\shared\utils\responsive_utils.dart:412:9 - prefer_initializing_formals
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\shared\widgets\location_picker_widget.dart:460:39 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\shared\widgets\location_picker_widget.dart:487:39 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\shared\widgets\location_picker_widget.dart:514:39 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\shared\widgets\location_picker_widget.dart:543:33 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\shared\widgets\location_picker_widget.dart:638:51 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\shared\widgets\location_picker_widget.dart:668:51 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\shared\widgets\location_picker_widget.dart:780:44 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\shared\widgets\location_picker_widget.dart:818:39 - deprecated_member_use
+   info - 'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss - lib\shared\widgets\location_picker_widget.dart:830:54 - deprecated_member_use
+
+flutter : 79 issues found. (ran in 10.2s)
+At line:1 char:1
++ flutter analyze 2>&1 | Out-File -FilePath analyze_output.txt -Encodin ...
++ ~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (79 issues found. (ran in 10.2s):String) [], RemoteExcep 
+   tion
+    + FullyQualifiedErrorId : NativeCommandError
+ 

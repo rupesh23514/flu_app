@@ -1,0 +1,7 @@
+{
+    "dart.previewFlutterUiGuides": true,
+    "dart.previewFlutterUiGuidesCustomTracking": true,
+    "dart.openDevTools": "flutter",
+    "liveServer.settings.port": 5501,
+    "git.ignoreLimitWarning": true
+}
