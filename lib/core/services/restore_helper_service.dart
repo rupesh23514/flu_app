@@ -28,8 +28,9 @@ class RestoreResult {
   factory RestoreResult.incompatibleVersion(int version) => RestoreResult(
         success: false,
         errorMessage:
-            'Backup is from an older app version (database v$version) and is not compatible. '
-            'Minimum required version is ${GoogleDriveService.minSupportedDbVersion}.',
+            'This backup was created by a newer version of the app '
+            '(database v$version, app supports up to v${DatabaseService.currentVersion}). '
+            'Please update the app to the latest version and try again.',
         versionIncompatible: true,
         backupVersion: version,
       );
@@ -86,28 +87,47 @@ class RestoreHelperService {
 
       pathToRestore = downloadPath;
 
-      // Decrypt if encrypted
+      // Decrypt if encrypted (backward compat for older encrypted backups)
       final isEncrypted = await _encryptionService.isFileEncrypted(downloadPath);
       if (isEncrypted) {
         final decryptedPath = await _encryptionService.decryptFile(downloadPath);
-        if (decryptedPath != null) {
-          pathToRestore = decryptedPath;
+        if (decryptedPath == null) {
+          // Decryption failed — likely wrong key (different device)
+          return RestoreResult.failure(
+            'This backup was encrypted on a different device and cannot be '
+            'decrypted here. Please open the app on your old device, '
+            'backup again (the new version uploads without encryption), '
+            'then restore on this device.',
+          );
         }
+        pathToRestore = decryptedPath;
       }
 
-      // Check version compatibility
+      // Check backup version BEFORE restoring — give user-friendly error
       final backupVersion = await _driveService.getBackupDatabaseVersion(pathToRestore);
-      if (backupVersion > 0 && !_driveService.isBackupCompatible(backupVersion)) {
-        return RestoreResult.incompatibleVersion(backupVersion);
+      debugPrint('Backup database version: $backupVersion (app supports v1-v${DatabaseService.currentVersion})');
+
+      if (!_driveService.isBackupCompatible(backupVersion)) {
+        if (backupVersion > DatabaseService.currentVersion) {
+          return RestoreResult.incompatibleVersion(backupVersion);
+        }
+        return RestoreResult.failure(
+          'Backup has an invalid database version ($backupVersion). '
+          'The file may be corrupted.',
+        );
       }
 
-      // Restore database
+      // Restore database — handles migration from any version automatically
       final success = await DatabaseService.instance.restoreFromFile(pathToRestore);
 
       if (success) {
         return RestoreResult.success();
       } else {
-        return RestoreResult.failure('Restore failed. Database may be corrupted.');
+        // Use the detailed error from DatabaseService if available
+        final detailedError = DatabaseService.instance.lastRestoreError;
+        return RestoreResult.failure(
+          detailedError ?? 'Restore failed. Database may be corrupted.',
+        );
       }
     } catch (e) {
       debugPrint('RestoreHelperService error: $e');

@@ -1,10 +1,14 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:workmanager/workmanager.dart';
 import 'alarm_service.dart';
+import 'backup_service.dart';
 import 'database_service.dart';
+import 'google_drive_service.dart';
 
-/// WorkManager Service for reliable background alarm verification
-/// This ensures alarms are never missed even if the app is killed
+/// WorkManager Service for reliable background tasks:
+/// - Periodic alarm verification (ensures alarms are never missed)
+/// - Periodic auto-backup to Google Drive (if enabled)
 class WorkManagerService {
   static final WorkManagerService _instance = WorkManagerService._internal();
   static WorkManagerService get instance => _instance;
@@ -13,6 +17,8 @@ class WorkManagerService {
   // Task names
   static const String alarmCheckTask = 'alarm_verification_task';
   static const String periodicAlarmCheck = 'periodic_alarm_check';
+  static const String autoBackupTask = 'auto_backup_task';
+  static const String periodicAutoBackup = 'periodic_auto_backup';
 
   bool _isInitialized = false;
 
@@ -23,11 +29,10 @@ class WorkManagerService {
     try {
       await Workmanager().initialize(
         callbackDispatcher,
-        isInDebugMode: false, // Set to true for debugging
+        isInDebugMode: false,
       );
 
       // Register periodic task to verify alarms every 15 minutes
-      // This is the minimum interval allowed by WorkManager
       await Workmanager().registerPeriodicTask(
         periodicAlarmCheck,
         alarmCheckTask,
@@ -44,8 +49,25 @@ class WorkManagerService {
         backoffPolicyDelay: const Duration(minutes: 5),
       );
 
+      // Register periodic auto-backup (runs daily, checks if due)
+      await Workmanager().registerPeriodicTask(
+        periodicAutoBackup,
+        autoBackupTask,
+        frequency: const Duration(hours: 24),
+        constraints: Constraints(
+          networkType: NetworkType.connected, // Requires internet for Drive upload
+          requiresBatteryNotLow: true, // Don't drain battery
+          requiresCharging: false,
+          requiresDeviceIdle: false,
+          requiresStorageNotLow: true,
+        ),
+        existingWorkPolicy: ExistingWorkPolicy.keep,
+        backoffPolicy: BackoffPolicy.exponential,
+        backoffPolicyDelay: const Duration(minutes: 30),
+      );
+
       _isInitialized = true;
-      debugPrint('✅ WorkManager initialized with periodic alarm check');
+      debugPrint('✅ WorkManager initialized with alarm check + auto-backup');
     } catch (e) {
       debugPrint('❌ WorkManager initialization error: $e');
     }
@@ -85,6 +107,8 @@ void callbackDispatcher() {
     try {
       if (task == WorkManagerService.alarmCheckTask) {
         await _verifyAndRescheduleAlarms();
+      } else if (task == WorkManagerService.autoBackupTask) {
+        await _performAutoBackup();
       }
       return true;
     } catch (e) {
@@ -153,5 +177,54 @@ Future<void> _verifyAndRescheduleAlarms() async {
     }
   } catch (e) {
     debugPrint('❌ Error verifying alarms: $e');
+  }
+}
+
+/// Perform auto-backup to Google Drive if enabled
+Future<void> _performAutoBackup() async {
+  try {
+    // Check if auto-backup is enabled
+    final backupService = BackupService.instance;
+    await backupService.initialize();
+
+    final isEnabled = await backupService.isAutoBackupEnabled();
+    if (!isEnabled) {
+      debugPrint('📦 Auto-backup is disabled — skipping');
+      return;
+    }
+
+    // Initialize services
+    await DatabaseService.instance.initializeDatabase();
+    final driveService = GoogleDriveService.instance;
+    await driveService.initialize();
+
+    if (!driveService.isSignedIn) {
+      debugPrint('📦 Not signed in to Google Drive — skipping auto-backup');
+      return;
+    }
+
+    // Create a safe copy and upload to Drive
+    String tempCopyPath;
+    try {
+      tempCopyPath = await DatabaseService.instance.createSafeCopy();
+    } catch (e) {
+      debugPrint('❌ Auto-backup: Could not create database copy: $e');
+      return;
+    }
+
+    final success = await driveService.uploadDatabase(tempCopyPath);
+
+    // Clean up temp file
+    try {
+      await File(tempCopyPath).delete();
+    } catch (_) {}
+
+    if (success) {
+      debugPrint('✅ Auto-backup to Google Drive completed successfully');
+    } else {
+      debugPrint('❌ Auto-backup failed: ${driveService.errorMessage}');
+    }
+  } catch (e) {
+    debugPrint('❌ Auto-backup error: $e');
   }
 }

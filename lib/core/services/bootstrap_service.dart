@@ -13,6 +13,7 @@ import 'transaction_service.dart';
 import 'app_update_service.dart';
 import 'workmanager_service.dart';
 import 'oem_battery_helper.dart';
+import 'admin_telemetry_service.dart';
 
 /// Bootstrap Service - Centralized app initialization
 /// 
@@ -66,6 +67,7 @@ class BootstrapService {
       _isInitialized = true;
       _initializationCompleter!.complete(true);
       if (kDebugMode) debugPrint('✅ All services initialized successfully');
+      unawaited(AdminTelemetryService.instance.initialize());
       return true;
     } catch (e, stackTrace) {
       if (kDebugMode) {

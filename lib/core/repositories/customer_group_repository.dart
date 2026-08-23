@@ -8,7 +8,8 @@ import 'base_repository.dart';
 
 class CustomerGroupRepository extends BaseRepository {
   // Singleton pattern
-  static final CustomerGroupRepository _instance = CustomerGroupRepository._internal();
+  static final CustomerGroupRepository _instance =
+      CustomerGroupRepository._internal();
   static CustomerGroupRepository get instance => _instance;
   CustomerGroupRepository._internal();
 
@@ -65,17 +66,12 @@ class CustomerGroupRepository extends BaseRepository {
     });
   }
 
-  /// Delete customer group (soft delete) - also removes from junction table
+  /// Delete customer group (soft delete).
+  /// Note: Junction table entries are preserved to allow group restoration.
+  /// If group is restored, customer associations remain intact.
   Future<Result<int>> delete(int id) async {
     return safeTransaction((txn) async {
-      // Remove all customer-group associations
-      await txn.delete(
-        'customer_group_members',
-        where: 'group_id = ?',
-        whereArgs: [id],
-      );
-      
-      // Soft delete the group
+      // Soft delete the group (keep junction table entries for restorability)
       return await txn.update(
         'customer_groups',
         {'is_active': 0, 'updated_at': DateTime.now().toIso8601String()},
@@ -85,10 +81,31 @@ class CustomerGroupRepository extends BaseRepository {
     });
   }
 
+  /// Permanently delete customer group and all associations.
+  /// Use this when you want to completely remove the group.
+  Future<Result<int>> deleteEntirely(int id) async {
+    return safeTransaction((txn) async {
+      // Remove all customer-group associations (hard delete)
+      await txn.delete(
+        'customer_group_members',
+        where: 'group_id = ?',
+        whereArgs: [id],
+      );
+
+      // Hard delete the group
+      return await txn.delete(
+        'customer_groups',
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+    });
+  }
+
   // ==================== Multi-Group Operations ====================
 
   /// Get all groups for a customer
-  Future<Result<List<CustomerGroup>>> getGroupsForCustomer(int customerId) async {
+  Future<Result<List<CustomerGroup>>> getGroupsForCustomer(
+      int customerId) async {
     return safeExecute(() async {
       final db = await database;
       final maps = await db.rawQuery('''
@@ -132,7 +149,8 @@ class CustomerGroupRepository extends BaseRepository {
   }
 
   /// Remove customer from a group
-  Future<Result<int>> removeCustomerFromGroup(int customerId, int groupId) async {
+  Future<Result<int>> removeCustomerFromGroup(
+      int customerId, int groupId) async {
     return safeExecute(() async {
       final db = await database;
       return await db.delete(
@@ -155,8 +173,11 @@ class CustomerGroupRepository extends BaseRepository {
     });
   }
 
-  /// Update customer's groups (replace all)
-  Future<Result<void>> setCustomerGroups(int customerId, List<int> groupIds) async {
+  /// Update customer's groups (replace all).
+  /// Note: For typical use (1-10 groups), individual inserts are fine.
+  /// For bulk operations with many groups, consider using Batch.
+  Future<Result<void>> setCustomerGroups(
+      int customerId, List<int> groupIds) async {
     return safeTransaction((txn) async {
       // Remove all existing associations
       await txn.delete(
@@ -164,18 +185,106 @@ class CustomerGroupRepository extends BaseRepository {
         where: 'customer_id = ?',
         whereArgs: [customerId],
       );
-      
+
       // Add new associations
+      final now = DateTime.now().toIso8601String();
       for (final groupId in groupIds) {
         await txn.insert(
           'customer_group_members',
           {
             'customer_id': customerId,
             'group_id': groupId,
-            'created_at': DateTime.now().toIso8601String(),
+            'created_at': now,
           },
         );
       }
+    });
+  }
+
+  /// Bulk move customers from one group to another atomically.
+  /// Uses transaction to ensure no orphaned customers if operation fails mid-way.
+  /// Returns the count of customers actually moved (removed from source AND added to target).
+  /// Note: For very large lists (100+ customers), consider batch operations.
+  Future<Result<int>> bulkMoveCustomers({
+    required List<int> customerIds,
+    required int fromGroupId,
+    required int toGroupId,
+  }) async {
+    return safeTransaction((txn) async {
+      int successCount = 0;
+      final now = DateTime.now().toIso8601String();
+      for (final customerId in customerIds) {
+        // Remove from source group and check if deletion occurred
+        final deleted = await txn.delete(
+          'customer_group_members',
+          where: 'customer_id = ? AND group_id = ?',
+          whereArgs: [customerId, fromGroupId],
+        );
+        // Only add to target if customer was actually in source group
+        if (deleted > 0) {
+          final inserted = await txn.insert(
+            'customer_group_members',
+            {
+              'customer_id': customerId,
+              'group_id': toGroupId,
+              'created_at': now,
+            },
+            conflictAlgorithm: ConflictAlgorithm.ignore,
+          );
+          // Only count as success if insert actually created a row (not ignored due to conflict)
+          if (inserted > 0) {
+            successCount++;
+          }
+        }
+      }
+      return successCount;
+    });
+  }
+
+  /// Bulk add customers to multiple groups atomically.
+  /// Note: For very large lists (100+ combinations), consider using Batch.
+  /// Returns total number of insert attempts (may include ignored duplicates).
+  Future<Result<int>> bulkAddToGroups({
+    required List<int> customerIds,
+    required List<int> groupIds,
+  }) async {
+    return safeTransaction((txn) async {
+      int totalAdded = 0;
+      final now = DateTime.now().toIso8601String();
+      for (final customerId in customerIds) {
+        for (final groupId in groupIds) {
+          await txn.insert(
+            'customer_group_members',
+            {
+              'customer_id': customerId,
+              'group_id': groupId,
+              'created_at': now,
+            },
+            conflictAlgorithm: ConflictAlgorithm.ignore,
+          );
+          totalAdded++;
+        }
+      }
+      return totalAdded;
+    });
+  }
+
+  /// Bulk remove customers from a group atomically
+  Future<Result<int>> bulkRemoveFromGroup({
+    required List<int> customerIds,
+    required int groupId,
+  }) async {
+    return safeTransaction((txn) async {
+      int successCount = 0;
+      for (final customerId in customerIds) {
+        final deleted = await txn.delete(
+          'customer_group_members',
+          where: 'customer_id = ? AND group_id = ?',
+          whereArgs: [customerId, groupId],
+        );
+        if (deleted > 0) successCount++;
+      }
+      return successCount;
     });
   }
 
@@ -209,7 +318,7 @@ class CustomerGroupRepository extends BaseRepository {
         );
         return maps.map((map) => Customer.fromMap(map)).toList();
       }
-      
+
       final maps = await db.rawQuery('''
         SELECT c.* FROM customers c
         INNER JOIN customer_group_members cgm ON c.id = cgm.customer_id
@@ -227,7 +336,7 @@ class CustomerGroupRepository extends BaseRepository {
       final maps = await db.rawQuery('''
         SELECT c.* FROM customers c
         LEFT JOIN customer_group_members cgm ON c.id = cgm.customer_id
-        WHERE cgm.id IS NULL AND c.is_active = 1
+        WHERE cgm.customer_id IS NULL AND c.is_active = 1
         ORDER BY c.name ASC
       ''');
       return maps.map((map) => Customer.fromMap(map)).toList();
@@ -235,10 +344,11 @@ class CustomerGroupRepository extends BaseRepository {
   }
 
   // ==================== Legacy Support ====================
-  
+
   /// Assign customer to group (legacy - uses old group_id column)
   @Deprecated('Use addCustomerToGroup instead')
-  Future<Result<int>> assignCustomerToGroup(int customerId, int? groupId) async {
+  Future<Result<int>> assignCustomerToGroup(
+      int customerId, int? groupId) async {
     return safeExecute(() async {
       final db = await database;
       return await db.update(

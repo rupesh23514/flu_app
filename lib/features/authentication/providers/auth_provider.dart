@@ -38,7 +38,8 @@ class AuthProvider extends ChangeNotifier {
   void _startInactivityTimer() {
     _inactivityTimer?.cancel();
     if (_isAuthenticated && _autoLockTime > 0) {
-      debugPrint('AUTO-LOCK: Starting inactivity timer for $_autoLockTime seconds');
+      debugPrint(
+          'AUTO-LOCK: Starting inactivity timer for $_autoLockTime seconds');
       _inactivityTimer = Timer(Duration(seconds: _autoLockTime), () {
         debugPrint('AUTO-LOCK: Inactivity timer fired! Locking app.');
         logout();
@@ -58,7 +59,7 @@ class AuthProvider extends ChangeNotifier {
   /// Debounced to prevent excessive timer restarts during rapid interactions
   void updateActivity() {
     _lastActivityTime = DateTime.now();
-    
+
     // Debounce: Only restart timer after 1 second of no activity
     // This prevents excessive timer restarts during scrolling/rapid interactions
     _debounceTimer?.cancel();
@@ -73,19 +74,22 @@ class AuthProvider extends ChangeNotifier {
   /// Call this when app goes to background
   void onAppPaused() {
     _pausedTime = DateTime.now();
-    debugPrint('AUTO-LOCK: App paused at $_pausedTime, auto-lock time: $_autoLockTime seconds');
+    debugPrint(
+        'AUTO-LOCK: App paused at $_pausedTime, auto-lock time: $_autoLockTime seconds');
   }
 
   /// Call this when app resumes - returns true if should lock
   bool shouldAutoLock() {
     if (_pausedTime == null || !_isAuthenticated) {
-      debugPrint('AUTO-LOCK: pausedTime=$_pausedTime, isAuthenticated=$_isAuthenticated, skip lock');
+      debugPrint(
+          'AUTO-LOCK: pausedTime=$_pausedTime, isAuthenticated=$_isAuthenticated, skip lock');
       return false;
     }
-    
+
     final elapsedSeconds = DateTime.now().difference(_pausedTime!).inSeconds;
-    debugPrint('AUTO-LOCK: Elapsed $elapsedSeconds seconds since pause, threshold: $_autoLockTime');
-    
+    debugPrint(
+        'AUTO-LOCK: Elapsed $elapsedSeconds seconds since pause, threshold: $_autoLockTime');
+
     final shouldLock = elapsedSeconds >= _autoLockTime;
     if (shouldLock) {
       debugPrint('AUTO-LOCK: Will lock app!');
@@ -133,21 +137,68 @@ class AuthProvider extends ChangeNotifier {
     }
   }
 
+  // Lockout state
+  int _remainingAttempts = 5;
+  int _lockoutSeconds = 0;
+  bool _isLockedOut = false;
+
+  // Getters for lockout state
+  int get remainingAttempts => _remainingAttempts;
+  int get lockoutSeconds => _lockoutSeconds;
+  bool get isLockedOut => _isLockedOut;
+
+  /// Check lockout status and update state
+  Future<void> checkLockoutStatus() async {
+    _isLoading = true;
+    notifyListeners();
+
+    try {
+      final status = await _authService.getLockoutStatus();
+      _isLockedOut = status.isLockedOut;
+      _lockoutSeconds = status.remainingSeconds;
+      if (!_isLockedOut) {
+        _remainingAttempts = await _authService.getRemainingAttempts();
+      }
+    } catch (e) {
+      _errorMessage = 'Error checking lockout status';
+      // Reset to safe defaults on error
+      _isLockedOut = false;
+      _lockoutSeconds = 0;
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
   Future<bool> authenticateWithPin(String pin) async {
     _isLoading = true;
     _errorMessage = null;
     notifyListeners();
 
     try {
-      final isValid = await _authService.verifyPin(pin);
-      if (isValid) {
+      // Use rate-limited verification
+      final result = await _authService.verifyPinWithRateLimit(pin);
+
+      _remainingAttempts = result.remainingAttempts;
+      _lockoutSeconds = result.lockoutSeconds;
+      _isLockedOut = result.lockoutSeconds > 0;
+
+      if (result.status == AuthStatus.unavailable) {
+        // Auth system error - fail closed, don't allow retries
+        _errorMessage = 'Authentication unavailable. Please restart the app.';
+        _remainingAttempts = 0;
+      } else if (result.status == AuthStatus.success) {
         _isAuthenticated = true;
         _lastActivityTime = DateTime.now();
         // Load auto-lock time from storage on successful login
         _autoLockTime = await _authService.getAutoLockTime();
         _startInactivityTimer(); // Start timer after login
+      } else if (_isLockedOut) {
+        _errorMessage =
+            'Too many failed attempts. Try again in ${_formatLockoutTime(_lockoutSeconds)}.';
       } else {
-        _errorMessage = 'Incorrect PIN. Please try again.';
+        _errorMessage =
+            'Incorrect PIN. $_remainingAttempts attempt${_remainingAttempts != 1 ? 's' : ''} remaining.';
       }
     } catch (e) {
       _errorMessage = 'Authentication failed: $e';
@@ -158,8 +209,27 @@ class AuthProvider extends ChangeNotifier {
     return _isAuthenticated;
   }
 
+  String _formatLockoutTime(int seconds) {
+    if (seconds >= 60) {
+      final minutes = seconds ~/ 60;
+      final secs = seconds % 60;
+      return secs > 0 ? '$minutes min $secs sec' : '$minutes min';
+    }
+    return '$seconds sec';
+  }
+
   Future<bool> isPinSetup() async {
     return await _authService.isPinSetup();
+  }
+
+  /// Check if account setup is complete (PIN created + account choice made)
+  Future<bool> isAccountSetupComplete() async {
+    return await _authService.isAccountSetupComplete();
+  }
+
+  /// Check if user needs to complete account setup
+  Future<bool> needsAccountSetup() async {
+    return await _authService.needsAccountSetup();
   }
 
   // Add missing methods for compatibility
@@ -174,7 +244,7 @@ class AuthProvider extends ChangeNotifier {
   Future<bool> changePin(String currentPin, String newPin) async {
     // Prevent notification if provider is disposed
     if (!hasListeners) return false;
-    
+
     _isLoading = true;
     _errorMessage = null;
     notifyListeners();
@@ -187,7 +257,7 @@ class AuthProvider extends ChangeNotifier {
         if (hasListeners) notifyListeners();
         return false;
       }
-      
+
       final isCurrentPinValid = await _authService.verifyPin(currentPin);
       if (isCurrentPinValid) {
         final success = await _authService.changePin(currentPin, newPin);
@@ -254,7 +324,7 @@ class AuthProvider extends ChangeNotifier {
       notifyListeners();
     }
   }
-  
+
   @override
   void dispose() {
     _inactivityTimer?.cancel();

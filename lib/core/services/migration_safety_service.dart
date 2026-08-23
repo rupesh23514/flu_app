@@ -240,7 +240,11 @@ class MigrationSafetyService {
     }
   }
 
-  /// Perform deep validation of database integrity and auto-fix issues
+  /// Perform deep validation of database integrity.
+  ///
+  /// This is a READ-ONLY check — it reports issues but does NOT delete or
+  /// modify any records. Orphaned records (e.g. loans whose customer was
+  /// deleted) are logged as warnings so the developer can decide what to do.
   static Future<Map<String, dynamic>> performDeepValidation() async {
     final results = <String, dynamic>{
       'valid': true,
@@ -250,49 +254,64 @@ class MigrationSafetyService {
 
     try {
       final db = await DatabaseService.instance.database;
+      final warnings = results['warnings'] as List<String>;
 
-      // 1. Fix orphaned records first (loans without customers)
-      await db.rawDelete('''
-        DELETE FROM loans 
+      // 1. Count orphaned loans (loans without matching customer)
+      final orphanedLoans = await db.rawQuery('''
+        SELECT COUNT(*) as count FROM loans 
         WHERE customer_id NOT IN (SELECT id FROM customers)
       ''');
-
-      // 2. Fix orphaned payments (payments without loans)
-      await db.rawDelete('''
-        DELETE FROM payments 
-        WHERE loan_id NOT IN (SELECT id FROM loans)
-      ''');
-
-      // 3. Fix orphaned reminders if table exists
-      try {
-        await db.rawDelete('''
-          DELETE FROM reminders 
-          WHERE loan_id IS NOT NULL AND loan_id NOT IN (SELECT id FROM loans)
-        ''');
-        await db.rawDelete('''
-          DELETE FROM reminders 
-          WHERE customer_id IS NOT NULL AND customer_id NOT IN (SELECT id FROM customers)
-        ''');
-      } catch (_) {
-        // Reminders table may not exist
+      final orphanedLoanCount = (orphanedLoans.first['count'] as int?) ?? 0;
+      if (orphanedLoanCount > 0) {
+        warnings.add('Found $orphanedLoanCount orphaned loans (missing customer)');
       }
 
-      // 4. Check integrity after cleanup
+      // 2. Count orphaned payments (payments without matching loan)
+      final orphanedPayments = await db.rawQuery('''
+        SELECT COUNT(*) as count FROM payments 
+        WHERE loan_id NOT IN (SELECT id FROM loans)
+      ''');
+      final orphanedPaymentCount = (orphanedPayments.first['count'] as int?) ?? 0;
+      if (orphanedPaymentCount > 0) {
+        warnings.add('Found $orphanedPaymentCount orphaned payments (missing loan)');
+      }
+
+      // 3. Count orphaned reminders if table exists
+      try {
+        final orphanedReminderLoans = await db.rawQuery('''
+          SELECT COUNT(*) as count FROM reminders 
+          WHERE loan_id IS NOT NULL AND loan_id NOT IN (SELECT id FROM loans)
+        ''');
+        final orphanedReminderCustomers = await db.rawQuery('''
+          SELECT COUNT(*) as count FROM reminders 
+          WHERE customer_id IS NOT NULL AND customer_id NOT IN (SELECT id FROM customers)
+        ''');
+        final rl = (orphanedReminderLoans.first['count'] as int?) ?? 0;
+        final rc = (orphanedReminderCustomers.first['count'] as int?) ?? 0;
+        if (rl > 0 || rc > 0) {
+          warnings.add('Found ${rl + rc} orphaned reminders');
+        }
+      } catch (_) {
+        // Reminders table may not exist in older databases
+      }
+
+      // 4. SQLite integrity check
       final integrityCheck = await db.rawQuery('PRAGMA integrity_check');
       final integrityResult = integrityCheck.isNotEmpty 
           ? (integrityCheck.first['integrity_check'] as String?) ?? 'ok'
           : 'ok';
       if (integrityResult != 'ok') {
         results['valid'] = false;
-        results['errors']
+        (results['errors'] as List<String>)
             .add('Database integrity check failed: $integrityResult');
       }
 
       debugPrint(
-          '$_tag: Deep validation complete: ${results['valid'] ? 'PASSED' : 'FAILED'}');
+          '$_tag: Deep validation complete: ${results['valid'] ? 'PASSED' : 'FAILED'}'
+          '${warnings.isNotEmpty ? ' (${warnings.length} warnings)' : ''}');
     } catch (e) {
       results['valid'] = false;
-      results['errors'].add('Validation error: $e');
+      (results['errors'] as List<String>).add('Validation error: $e');
     }
 
     return results;

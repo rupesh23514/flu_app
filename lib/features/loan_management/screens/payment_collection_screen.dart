@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:decimal/decimal.dart';
 import 'package:intl/intl.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../core/services/permission_service.dart';
 import '../../../shared/models/loan.dart';
 import '../../../shared/models/customer.dart';
 import '../providers/loan_provider.dart';
@@ -160,6 +161,14 @@ class _PaymentCollectionScreenState extends State<PaymentCollectionScreen> {
         title: const Text('Payment Collection'),
         backgroundColor: AppColors.primary,
         foregroundColor: Colors.white,
+        actions: [
+          if (_selectedCustomer != null)
+            IconButton(
+              icon: const Icon(Icons.phone),
+              tooltip: 'Call customer',
+              onPressed: () => _handleCallCustomer(_selectedCustomer!),
+            ),
+        ],
       ),
       body: Consumer2<LoanProvider, CustomerProvider>(
         builder: (context, loanProvider, customerProvider, child) {
@@ -455,6 +464,95 @@ class _PaymentCollectionScreenState extends State<PaymentCollectionScreen> {
         },
       ),
     );
+  }
+
+  Future<void> _handleCallCustomer(Customer customer) async {
+    if (customer.phoneNumber.trim().isEmpty &&
+        (customer.alternatePhone == null ||
+            customer.alternatePhone!.trim().isEmpty)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No phone number'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+      }
+      return;
+    }
+
+    String phoneToCall = customer.phoneNumber;
+
+    if (customer.hasMultiplePhones) {
+      final selected = await showDialog<String>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Select Phone Number'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const CircleAvatar(child: Text('1')),
+                title: Text(customer.phoneNumber),
+                subtitle: const Text('Primary'),
+                onTap: () => Navigator.of(context).pop(customer.phoneNumber),
+              ),
+              ListTile(
+                leading: const CircleAvatar(child: Text('2')),
+                title: Text(customer.alternatePhone!),
+                subtitle: const Text('Alternate'),
+                onTap: () => Navigator.of(context).pop(customer.alternatePhone),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+          ],
+        ),
+      );
+      if (selected == null) return;
+      phoneToCall = selected;
+    }
+
+    final permissionService = PermissionService.instance;
+    final result = await permissionService.launchPhoneCall(phoneToCall);
+
+    if (!mounted) return;
+
+    switch (result) {
+      case PhoneCallResult.success:
+        break;
+      case PhoneCallResult.noNumber:
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No phone number'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+        break;
+      case PhoneCallResult.permissionDenied:
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Phone permission required to make calls'),
+            action: SnackBarAction(
+              label: 'Settings',
+              onPressed: () => permissionService.openSettings(),
+            ),
+          ),
+        );
+        break;
+      case PhoneCallResult.launchFailed:
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Cannot make phone call'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+        break;
+    }
   }
 
   @override

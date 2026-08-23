@@ -80,13 +80,22 @@ class GlobalSearchService {
     final isDigitsOnly = RegExp(r'^\d+$').hasMatch(trimmedQuery);
     final isPhoneLike = trimmedQuery.length >= 3 && RegExp(r'^[\d\s\-+]+$').hasMatch(trimmedQuery);
 
-    // FAST PATH 1: Exact book number match (numeric input)
-    if (isDigitsOnly) {
+    // FAST PATH 1: Exact book number match (any input - supports alphanumeric like 's440')
+    {
       final bookNoResult = await _searchByExactBookNo(trimmedQuery);
       if (bookNoResult != null) {
+        // Also fetch other results, but guarantee exact book match is first
+        final otherResults = await Future.wait([
+          _searchLoansOptimized(trimmedQuery, isDigitsOnly, limit: limit),
+          _searchCustomersOptimized(trimmedQuery, limit: limit),
+        ]);
+        // Remove duplicate of the exact match from other loan results
+        final otherLoans = otherResults[0]
+            .where((r) => r.id != bookNoResult.id)
+            .toList();
         return GlobalSearchResults(
-          customers: [],
-          loans: [bookNoResult],
+          customers: otherResults[1],
+          loans: [bookNoResult, ...otherLoans],
           payments: [],
         );
       }
@@ -130,7 +139,7 @@ class GlobalSearchService {
         SELECT l.*, c.name as customer_name
         FROM loans l
         INNER JOIN customers c ON l.customer_id = c.id AND c.is_active = 1
-        WHERE l.is_active = 1 AND l.book_no = ?
+        WHERE l.is_active = 1 AND LOWER(l.book_no) = LOWER(?)
         LIMIT 1
       ''', [bookNo]);
 
@@ -238,8 +247,8 @@ class GlobalSearchService {
         )
         ORDER BY 
           CASE 
-            WHEN l.book_no = ? THEN 0
-            WHEN l.book_no LIKE ? THEN 1
+            WHEN LOWER(l.book_no) = LOWER(?) THEN 0
+            WHEN LOWER(l.book_no) LIKE LOWER(?) THEN 1
             WHEN c.phone_number LIKE ? THEN 2
             WHEN LOWER(c.name) LIKE ? THEN 3
             ELSE 4

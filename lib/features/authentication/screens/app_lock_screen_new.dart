@@ -1,10 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../../../core/constants/app_colors.dart';
 import '../providers/auth_provider.dart';
 import '../../../core/services/auth_service.dart';
-import '../../../core/services/restore_helper_service.dart';
 
 class AppLockScreen extends StatefulWidget {
   const AppLockScreen({super.key});
@@ -13,19 +14,23 @@ class AppLockScreen extends StatefulWidget {
   State<AppLockScreen> createState() => _AppLockScreenState();
 }
 
-class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProviderStateMixin {
+class _AppLockScreenState extends State<AppLockScreen>
+    with SingleTickerProviderStateMixin {
   final AuthService _authService = AuthService();
-  final RestoreHelperService _restoreHelper = RestoreHelperService.instance;
   final List<String> _pin = [];
   final List<String> _confirmPin = [];
-  
+
   bool _isCreatingPin = false;
   bool _isConfirmingPin = false;
   bool _hasError = false;
   String _errorMessage = '';
   bool _isLoading = true;
-  bool _isRestoringFromCloud = false;
-  
+
+  // Lockout state
+  bool _isLockedOut = false;
+  int _lockoutSeconds = 0;
+  Timer? _lockoutTimer;
+
   late AnimationController _shakeController;
   late Animation<double> _shakeAnimation;
 
@@ -44,60 +49,72 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
 
   @override
   void dispose() {
+    _lockoutTimer?.cancel();
     _shakeController.dispose();
     super.dispose();
   }
 
   Future<void> _checkPinStatus() async {
     final hasPin = await _authService.hasPin();
-    
-    if (!mounted) return; // Safety check for async operation
-    
+    final needsAccountSetup = await _authService.needsAccountSetup();
+
+    if (!mounted) return;
+
+    // If PIN exists but account setup not complete, go to account choice
+    if (hasPin && needsAccountSetup) {
+      Navigator.of(context).pushReplacementNamed('/account-choice');
+      return;
+    }
+
+    // Check lockout status for existing PIN
+    if (hasPin) {
+      await _checkLockoutStatus();
+      if (!mounted) return; // Guard after async call
+    }
+
     setState(() {
       _isCreatingPin = !hasPin;
       _isLoading = false;
     });
   }
-  
-  /// Restore data from Google Drive - for fresh installs
-  Future<void> _restoreFromCloud() async {
-    if (_isRestoringFromCloud) return;
-    
-    setState(() {
-      _isRestoringFromCloud = true;
-      _hasError = false;
-      _errorMessage = '';
-    });
-    
-    // Use centralized restore helper to avoid code duplication
-    final result = await _restoreHelper.restoreFromGoogleDrive(signInIfNeeded: true);
-    
-    if (!mounted) return;
-    
-    setState(() {
-      _isRestoringFromCloud = false;
-    });
-    
-    if (result.success) {
-      // Show success message and continue with PIN setup
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ Data restored successfully! Now create your PIN.'),
-          backgroundColor: AppColors.success,
-          duration: Duration(seconds: 3),
-        ),
-      );
-    } else {
+
+  Future<void> _checkLockoutStatus() async {
+    final lockoutStatus = await _authService.getLockoutStatus();
+    if (lockoutStatus.isLockedOut && mounted) {
       setState(() {
-        _hasError = true;
-        _errorMessage = result.errorMessage ?? 'Restore failed. Please try again.';
+        _isLockedOut = true;
+        _lockoutSeconds = lockoutStatus.remainingSeconds;
       });
+      _startLockoutTimer();
     }
   }
 
+  void _startLockoutTimer() {
+    _lockoutTimer?.cancel();
+    _lockoutTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        // Check before decrementing to prevent negative values
+        if (_lockoutSeconds <= 1) {
+          _isLockedOut = false;
+          _lockoutSeconds = 0;
+          timer.cancel();
+        } else {
+          _lockoutSeconds--;
+        }
+      });
+    });
+  }
+
   void _onNumberPressed(String number) {
+    // Block input if locked out
+    if (_isLockedOut) return;
+
     HapticFeedback.lightImpact();
-    
+
     setState(() {
       _hasError = false;
       _errorMessage = '';
@@ -130,7 +147,7 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
 
   void _onBackspace() {
     HapticFeedback.lightImpact();
-    
+
     setState(() {
       if (_isConfirmingPin && _confirmPin.isNotEmpty) {
         _confirmPin.removeLast();
@@ -152,7 +169,10 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
       if (mounted) {
         final authProvider = Provider.of<AuthProvider>(context, listen: false);
         final success = await authProvider.setupPin(_pin.join());
-        if (!success && mounted) {
+        if (success && mounted) {
+          // Navigate to account choice screen instead of dashboard
+          Navigator.of(context).pushReplacementNamed('/account-choice');
+        } else if (!success && mounted) {
           _showError('Error creating PIN');
         }
       }
@@ -170,12 +190,21 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
     final authProvider = Provider.of<AuthProvider>(context, listen: false);
     final success = await authProvider.authenticateWithPin(_pin.join());
     if (!success && mounted) {
+      // Check if we're now locked out
+      if (authProvider.isLockedOut) {
+        setState(() {
+          _isLockedOut = true;
+          _lockoutSeconds = authProvider.lockoutSeconds;
+        });
+        _startLockoutTimer();
+      }
       _showError(authProvider.errorMessage ?? 'Wrong PIN');
       _shakeController.forward().then((_) => _shakeController.reset());
       setState(() {
         _pin.clear();
       });
     }
+    // Note: Navigation on success is handled by Consumer<AuthProvider> in app.dart
   }
 
   void _showError(String message) {
@@ -201,25 +230,35 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
         child: Column(
           children: [
             const Spacer(flex: 2),
-            
+
             // Logo and Title
             _buildHeader(),
-            
+
             const SizedBox(height: 48),
-            
-            // PIN Dots
+
+            // Lockout indicator
+            if (_isLockedOut) ...[
+              _buildLockoutIndicator(),
+              const SizedBox(height: 24),
+            ],
+
+            // PIN Dots (dimmed when locked out)
             AnimatedBuilder(
               animation: _shakeAnimation,
               builder: (context, child) {
                 return Transform.translate(
-                  offset: Offset(_shakeAnimation.value * (_hasError ? 1 : 0), 0),
-                  child: _buildPinDots(),
+                  offset:
+                      Offset(_shakeAnimation.value * (_hasError ? 1 : 0), 0),
+                  child: Opacity(
+                    opacity: _isLockedOut ? 0.5 : 1.0,
+                    child: _buildPinDots(),
+                  ),
                 );
               },
             ),
-            
+
             // Error Message
-            if (_hasError) ...[
+            if (_hasError && !_isLockedOut) ...[
               const SizedBox(height: 16),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -234,40 +273,22 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
                 ),
               ),
             ],
-            
-            // Restore from Cloud button (shown only when creating PIN for first time)
-            if (_isCreatingPin && !_isConfirmingPin) ...[
-              const SizedBox(height: 20),
-              _buildRestoreFromCloudButton(),
-            ],
-            
+
             const Spacer(),
-            
-            // Number Pad (hide when restoring)
-            if (!_isRestoringFromCloud)
-              _buildNumberPad()
-            else
-              const Padding(
-                padding: EdgeInsets.all(48),
-                child: Column(
-                  children: [
-                    CircularProgressIndicator(color: AppColors.primary),
-                    SizedBox(height: 16),
-                    Text(
-                      'Restoring your data...',
-                      style: TextStyle(
-                        color: AppColors.textSecondary,
-                        fontSize: 16,
-                      ),
-                    ),
-                  ],
-                ),
+
+            // Number Pad (disabled when locked out)
+            Opacity(
+              opacity: _isLockedOut ? 0.5 : 1.0,
+              child: IgnorePointer(
+                ignoring: _isLockedOut,
+                child: _buildNumberPad(),
               ),
-            
+            ),
+
             const SizedBox(height: 24),
-            
+
             const Spacer(),
-            
+
             // Version info
             Text(
               'Version 1.0.0',
@@ -276,7 +297,7 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
                 fontSize: 12,
               ),
             ),
-            
+
             const SizedBox(height: 16),
           ],
         ),
@@ -284,10 +305,54 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
     );
   }
 
+  Widget _buildLockoutIndicator() {
+    final minutes = _lockoutSeconds ~/ 60;
+    final seconds = _lockoutSeconds % 60;
+    final timeString = minutes > 0
+        ? '${minutes}m ${seconds.toString().padLeft(2, '0')}s'
+        : '${seconds}s';
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 32),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.error.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.error.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        children: [
+          const Icon(
+            Icons.lock_clock,
+            color: AppColors.error,
+            size: 32,
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Too Many Attempts',
+            style: TextStyle(
+              color: AppColors.error,
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Try again in $timeString',
+            style: TextStyle(
+              color: AppColors.error.withValues(alpha: 0.8),
+              fontSize: 14,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildHeader() {
     String title;
     String subtitle;
-    
+
     if (_isCreatingPin) {
       if (_isConfirmingPin) {
         title = 'Confirm PIN';
@@ -298,13 +363,15 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
       }
     } else {
       title = 'Welcome Back';
-      subtitle = 'Enter your PIN to continue';
+      subtitle = _isLockedOut
+          ? 'Account temporarily locked'
+          : 'Enter your PIN to continue';
     }
-    
+
     final screenWidth = MediaQuery.of(context).size.width;
     final iconSize = screenWidth < 360 ? 60.0 : 80.0;
     final titleSize = screenWidth < 360 ? 24.0 : 28.0;
-    
+
     return Column(
       children: [
         // App Icon
@@ -355,7 +422,7 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
 
   Widget _buildPinDots() {
     final currentPin = _isConfirmingPin ? _confirmPin : _pin;
-    
+
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: List.generate(4, (index) {
@@ -366,12 +433,12 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
           height: 20,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: isFilled 
+            color: isFilled
                 ? (_hasError ? AppColors.error : AppColors.primary)
                 : Colors.transparent,
             border: Border.all(
-              color: _hasError 
-                  ? AppColors.error 
+              color: _hasError
+                  ? AppColors.error
                   : (isFilled ? AppColors.primary : AppColors.textSecondary),
               width: 2,
             ),
@@ -387,24 +454,30 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
     final horizontalPadding = screenWidth < 360 ? 24.0 : 48.0;
     final buttonSize = screenWidth < 360 ? 60.0 : 72.0;
     final fontSize = screenWidth < 360 ? 24.0 : 28.0;
-    
+
     return Padding(
       padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
       child: Column(
         children: [
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: ['1', '2', '3'].map((n) => _buildNumberButton(n, buttonSize, fontSize)).toList(),
+            children: ['1', '2', '3']
+                .map((n) => _buildNumberButton(n, buttonSize, fontSize))
+                .toList(),
           ),
           const SizedBox(height: 16),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: ['4', '5', '6'].map((n) => _buildNumberButton(n, buttonSize, fontSize)).toList(),
+            children: ['4', '5', '6']
+                .map((n) => _buildNumberButton(n, buttonSize, fontSize))
+                .toList(),
           ),
           const SizedBox(height: 16),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: ['7', '8', '9'].map((n) => _buildNumberButton(n, buttonSize, fontSize)).toList(),
+            children: ['7', '8', '9']
+                .map((n) => _buildNumberButton(n, buttonSize, fontSize))
+                .toList(),
           ),
           const SizedBox(height: 16),
           Row(
@@ -413,7 +486,8 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
               // Empty space placeholder
               SizedBox(width: buttonSize, height: buttonSize),
               _buildNumberButton('0', buttonSize, fontSize),
-              _buildIconButton(Icons.backspace_outlined, _onBackspace, buttonSize),
+              _buildIconButton(
+                  Icons.backspace_outlined, _onBackspace, buttonSize),
             ],
           ),
         ],
@@ -469,51 +543,6 @@ class _AppLockScreenState extends State<AppLockScreen> with SingleTickerProvider
             ),
           ),
         ),
-      ),
-    );
-  }
-  
-  /// Build the "Restore from Cloud" button for fresh installs
-  Widget _buildRestoreFromCloudButton() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 48),
-      child: Column(
-        children: [
-          const Divider(height: 32),
-          Text(
-            'Have existing data?',
-            style: TextStyle(
-              color: AppColors.textSecondary.withValues(alpha: 0.8),
-              fontSize: 14,
-            ),
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: _isRestoringFromCloud ? null : _restoreFromCloud,
-              icon: const Icon(Icons.cloud_download_outlined, size: 20),
-              label: const Text('Restore from Google Drive'),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: AppColors.primary,
-                side: const BorderSide(color: AppColors.primary),
-                padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Sign in to recover your backed up data',
-            style: TextStyle(
-              color: AppColors.textSecondary.withValues(alpha: 0.6),
-              fontSize: 12,
-            ),
-            textAlign: TextAlign.center,
-          ),
-        ],
       ),
     );
   }

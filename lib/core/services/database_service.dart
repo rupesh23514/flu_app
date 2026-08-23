@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:sqflite/sqflite.dart';
 import 'package:flutter/foundation.dart';
@@ -10,6 +11,29 @@ import '../../shared/models/loan.dart';
 import '../../shared/models/payment.dart';
 import '../../shared/models/pagination_result.dart';
 
+/// Database service handling SQLite operations for the app.
+///
+/// **Security Note (TODO)**: The database is currently unencrypted. For a financial
+/// application handling sensitive customer data, consider using `sqflite_sqlcipher`
+/// or similar library to encrypt data at rest. The encryption key should be stored
+/// securely in the device's Keystore (Android) or Keychain (iOS).
+///
+/// **Architecture Note (TODO)**: This class has grown to handle multiple concerns:
+/// - Database lifecycle management (init, close, backup, restore)
+/// - Schema migrations (version 1-12)
+/// - CRUD operations for Customers, Loans, Payments, Groups, Reminders
+///
+/// **Recommended Refactoring**:
+/// 1. Extract a `DatabaseManager` class for lifecycle/migrations
+/// 2. Create domain-specific repositories:
+///    - `CustomerRepository` for customer operations
+///    - `LoanRepository` for loan operations
+///    - `PaymentRepository` for payment operations
+///    - `ReminderRepository` for reminder operations
+/// 3. Move business logic (e.g., tenure fixing, status-based sorting) to
+///    a dedicated Business Logic/Service layer
+///
+/// This refactoring would improve maintainability and testability.
 class DatabaseService {
   /// Permanently delete a customer and all related data (loans, payments)
   Future<void> deleteCustomerEntirely(int customerId) async {
@@ -57,6 +81,14 @@ class DatabaseService {
   static String? _databasePath;
   static bool _schemaEnsured = false;
 
+  /// Current database schema version. ALL version references should use this.
+  static const int currentVersion = 12;
+
+  /// Detailed error message from the last failed restore operation.
+  /// Callers should read this when `restoreFromFile()` returns false.
+  String? _lastRestoreError;
+  String? get lastRestoreError => _lastRestoreError;
+
   DatabaseService._internal();
 
   Future<Database> get database async {
@@ -88,7 +120,10 @@ class DatabaseService {
       _schemaEnsured = true;
       debugPrint('All database schemas verified');
     } catch (e) {
-      debugPrint('Error ensuring schemas: $e');
+      // Set flag to true even on error to prevent infinite retry loop
+      // The app can still function with partial schema - individual operations will fail gracefully
+      _schemaEnsured = true;
+      debugPrint('Error ensuring schemas: ${e.runtimeType}');
     }
   }
 
@@ -155,28 +190,35 @@ class DatabaseService {
 
   /// Create a safe copy of the database file for backup purposes.
   /// This uses SQLite's backup mechanism to avoid corrupting active database.
-  /// Returns the path to the temporary copy, or null if copy failed.
-  Future<String?> createSafeCopy() async {
-    try {
-      final dbPath = await getDatabasePath();
-      final tempDir = await getTemporaryDirectory();
-      final tempPath = join(tempDir.path, 'backup_copy_${DateTime.now().millisecondsSinceEpoch}.db');
-      
-      // Close any pending transactions by getting a checkpoint
-      final db = await database;
-      await db.execute('PRAGMA wal_checkpoint(TRUNCATE)');
-      
-      // Copy the database file
-      final sourceFile = File(dbPath);
-      if (await sourceFile.exists()) {
-        await sourceFile.copy(tempPath);
-        return tempPath;
-      }
-      return null;
-    } catch (e) {
-      debugPrint('Error creating safe database copy: $e');
-      return null;
+  /// Returns the path to the temporary copy.
+  /// Throws an exception with details if copy failed.
+  Future<String> createSafeCopy() async {
+    final dbPath = await getDatabasePath();
+    final sourceFile = File(dbPath);
+    
+    if (!await sourceFile.exists()) {
+      throw Exception('Database file does not exist at: $dbPath');
     }
+
+    final tempDir = await getTemporaryDirectory();
+    final tempPath = join(tempDir.path,
+        'backup_copy_${DateTime.now().millisecondsSinceEpoch}.db');
+
+    // Flush WAL to main database file before copying
+    // Use rawQuery for PRAGMA commands (execute() doesn't support them in sqflite)
+    final db = await database;
+    await db.rawQuery('PRAGMA wal_checkpoint(TRUNCATE)');
+
+    // Copy the database file
+    await sourceFile.copy(tempPath);
+    
+    // Verify the copy was created
+    final copiedFile = File(tempPath);
+    if (!await copiedFile.exists()) {
+      throw Exception('Failed to create copy at: $tempPath');
+    }
+    
+    return tempPath;
   }
 
   /// Clear and recreate the entire database - FOR TESTING/DEVELOPMENT ONLY
@@ -205,7 +247,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 12,
+      version: currentVersion,
       onCreate: _createTables,
       onUpgrade: _upgradeDatabase,
     );
@@ -685,11 +727,12 @@ class DatabaseService {
       await db.execute('ALTER TABLE customers RENAME TO customers_backup');
 
       // Create new customers table with book_no column
+      // Note: phone_number is NOT UNIQUE to allow same person with multiple loans
       await db.execute('''
         CREATE TABLE customers (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL,
-          phone_number TEXT NOT NULL UNIQUE,
+          phone_number TEXT NOT NULL,
           alternate_phone TEXT,
           address TEXT,
           book_no TEXT,
@@ -748,9 +791,17 @@ class DatabaseService {
       debugPrint(
           'Upgrading database to version 9: Adding location fields to customers');
 
-      // Add latitude and longitude columns for map integration
-      await db.execute('ALTER TABLE customers ADD COLUMN latitude REAL');
-      await db.execute('ALTER TABLE customers ADD COLUMN longitude REAL');
+      // Check if columns already exist (V7 migration may have added them)
+      final tableInfo = await db.rawQuery('PRAGMA table_info(customers)');
+      final columns = tableInfo.map((row) => row['name'].toString()).toSet();
+
+      // Add latitude and longitude columns only if they don't exist
+      if (!columns.contains('latitude')) {
+        await db.execute('ALTER TABLE customers ADD COLUMN latitude REAL');
+      }
+      if (!columns.contains('longitude')) {
+        await db.execute('ALTER TABLE customers ADD COLUMN longitude REAL');
+      }
 
       debugPrint('Database successfully upgraded to version 9');
     }
@@ -960,7 +1011,9 @@ class DatabaseService {
     );
   }
 
-  Future<int> deleteCustomer(int id) async {
+  /// Soft delete a customer (sets is_active = 0).
+  /// For permanent deletion, use [deleteCustomerEntirely].
+  Future<int> softDeleteCustomer(int id) async {
     final db = await database;
     return await db.update(
       'customers',
@@ -987,6 +1040,56 @@ class DatabaseService {
       orderBy: 'name ASC',
     );
     return maps.map((map) => CustomerGroup.fromMap(map)).toList();
+  }
+
+  /// Get all customer groups with their customer counts in a single query
+  /// This avoids N+1 query problem when loading groups with counts
+  Future<List<Map<String, dynamic>>> getAllCustomerGroupsWithCounts() async {
+    final db = await database;
+    final result = await db.rawQuery('''
+      SELECT g.*, 
+        (SELECT COUNT(DISTINCT cgm.customer_id) 
+         FROM customer_group_members cgm 
+         INNER JOIN customers c ON cgm.customer_id = c.id 
+         WHERE cgm.group_id = g.id AND c.is_active = 1) as customer_count
+      FROM customer_groups g
+      WHERE g.is_active = 1
+      ORDER BY g.name ASC
+    ''');
+    return result;
+  }
+
+  /// Search customers by name or phone with database-side filtering
+  /// Use for large datasets instead of loading all customers into memory
+  Future<List<Customer>> searchCustomers(String query, {int limit = 50}) async {
+    final db = await database;
+    final searchTerm = '%${query.toLowerCase()}%';
+    final maps = await db.query(
+      'customers',
+      where: '(LOWER(name) LIKE ? OR phone_number LIKE ?) AND is_active = ?',
+      whereArgs: [searchTerm, searchTerm, 1],
+      orderBy: 'name ASC',
+      limit: limit,
+    );
+    return maps.map((map) => Customer.fromMap(map)).toList();
+  }
+
+  /// Search customers not in a specific group
+  Future<List<Customer>> searchCustomersNotInGroup(String query, int groupId,
+      {int limit = 50}) async {
+    final db = await database;
+    final searchTerm = '%${query.toLowerCase()}%';
+    final maps = await db.rawQuery('''
+      SELECT c.* FROM customers c
+      WHERE c.is_active = 1
+        AND (LOWER(c.name) LIKE ? OR c.phone_number LIKE ?)
+        AND c.id NOT IN (
+          SELECT customer_id FROM customer_group_members WHERE group_id = ?
+        )
+      ORDER BY c.name ASC
+      LIMIT ?
+    ''', [searchTerm, searchTerm, groupId, limit]);
+    return maps.map((map) => Customer.fromMap(map)).toList();
   }
 
   Future<CustomerGroup?> getCustomerGroupById(int id) async {
@@ -1055,20 +1158,46 @@ class DatabaseService {
     return maps.map((map) => Customer.fromMap(map)).toList();
   }
 
+  /// Assign customer to a single group (updates both legacy column and junction table)
   Future<int> assignCustomerToGroup(int customerId, int? groupId) async {
     final db = await database;
-    return await db.update(
-      'customers',
-      {'group_id': groupId, 'updated_at': DateTime.now().toIso8601String()},
-      where: 'id = ?',
-      whereArgs: [customerId],
-    );
+    final now = DateTime.now().toIso8601String();
+
+    return await db.transaction((txn) async {
+      // Update legacy group_id column
+      final result = await txn.update(
+        'customers',
+        {'group_id': groupId, 'updated_at': now},
+        where: 'id = ?',
+        whereArgs: [customerId],
+      );
+
+      // Also update junction table to keep in sync
+      await txn.delete(
+        'customer_group_members',
+        where: 'customer_id = ?',
+        whereArgs: [customerId],
+      );
+      if (groupId != null) {
+        await txn.insert('customer_group_members', {
+          'customer_id': customerId,
+          'group_id': groupId,
+          'created_at': now,
+        });
+      }
+
+      return result;
+    });
   }
 
   /// Add customer to multiple groups using junction table
+  /// Note: Uses individual inserts within a transaction. For typical use cases
+  /// (1-5 groups per customer), this overhead is negligible. For bulk operations
+  /// with many groups, consider using rawInsert with VALUES clause.
   Future<void> addCustomerToMultipleGroups(
       int customerId, List<int> groupIds) async {
     final db = await database;
+    final now = DateTime.now().toIso8601String();
     await db.transaction((txn) async {
       // Clear existing memberships for this customer
       await txn.delete(
@@ -1081,7 +1210,7 @@ class DatabaseService {
         await txn.insert('customer_group_members', {
           'customer_id': customerId,
           'group_id': groupId,
-          'created_at': DateTime.now().toIso8601String(),
+          'created_at': now,
         });
       }
       // Also update legacy group_id to first group (for backward compatibility)
@@ -1089,7 +1218,7 @@ class DatabaseService {
         'customers',
         {
           'group_id': groupIds.isNotEmpty ? groupIds.first : null,
-          'updated_at': DateTime.now().toIso8601String(),
+          'updated_at': now,
         },
         where: 'id = ?',
         whereArgs: [customerId],
@@ -1254,32 +1383,64 @@ class DatabaseService {
   }
 
   // Dashboard statistics
+  /// Helper to safely parse a SQL SUM result to Decimal.
+  /// Handles null, numeric, and string types to avoid precision loss.
+  Decimal _parseSumResult(dynamic value) {
+    if (value == null) return Decimal.zero;
+    if (value is String) {
+      return Decimal.tryParse(value) ?? Decimal.zero;
+    }
+    if (value is int) {
+      return Decimal.fromInt(value);
+    }
+    if (value is double) {
+      return Decimal.tryParse(value.toStringAsFixed(2)) ?? Decimal.zero;
+    }
+    return Decimal.tryParse(value.toString()) ?? Decimal.zero;
+  }
+
   Future<Map<String, Decimal>> getDashboardStats() async {
     final db = await database;
 
-    // Total given (all active loans)
-    final totalGivenResult = await db.rawQuery(
-        'SELECT SUM(CAST(principal_amount AS REAL)) as total FROM loans WHERE is_active = 1');
-    final totalGiven =
-        Decimal.parse((totalGivenResult.first['total'] ?? 0).toString());
+    // Sum values precisely in Dart to avoid floating-point precision loss
+    // Total given (all active loans) - sum principal_amount as TEXT
+    final totalGivenRows = await db.rawQuery(
+        'SELECT principal_amount FROM loans WHERE is_active = 1');
+    Decimal totalGiven = Decimal.zero;
+    for (final row in totalGivenRows) {
+      final value = row['principal_amount'];
+      if (value != null) {
+        totalGiven += Decimal.tryParse(value.toString()) ?? Decimal.zero;
+      }
+    }
 
-    // Total received (all payments)
-    final totalReceivedResult = await db.rawQuery(
-        'SELECT SUM(CAST(amount AS REAL)) as total FROM payments WHERE is_active = 1');
-    final totalReceived =
-        Decimal.parse((totalReceivedResult.first['total'] ?? 0).toString());
+    // Total received (all payments) - sum amount as TEXT
+    final totalReceivedRows = await db.rawQuery(
+        'SELECT amount FROM payments WHERE is_active = 1');
+    Decimal totalReceived = Decimal.zero;
+    for (final row in totalReceivedRows) {
+      final value = row['amount'];
+      if (value != null) {
+        totalReceived += Decimal.tryParse(value.toString()) ?? Decimal.zero;
+      }
+    }
 
-    // Outstanding (remaining amount from active loans)
-    final outstandingResult = await db.rawQuery(
-        'SELECT SUM(CAST(remaining_amount AS REAL)) as total FROM loans WHERE is_active = 1 AND status IN (0, 1)');
-    final outstanding =
-        Decimal.parse((outstandingResult.first['total'] ?? 0).toString());
+    // Outstanding (remaining amount from active loans) - sum remaining_amount as TEXT
+    final outstandingRows = await db.rawQuery(
+        'SELECT remaining_amount FROM loans WHERE is_active = 1 AND status IN (0, 1)');
+    Decimal outstanding = Decimal.zero;
+    for (final row in outstandingRows) {
+      final value = row['remaining_amount'];
+      if (value != null) {
+        outstanding += Decimal.tryParse(value.toString()) ?? Decimal.zero;
+      }
+    }
 
-    // Today's collection
+    // Today's collection - still use SUM since daily values are small
     final todayCollectionResult = await db.rawQuery(
-        'SELECT SUM(CAST(amount AS REAL)) as total FROM payments WHERE date(payment_date) = date("now") AND is_active = 1');
+        'SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) as total FROM payments WHERE date(payment_date) = date("now") AND is_active = 1');
     final todayCollection =
-        Decimal.parse((todayCollectionResult.first['total'] ?? 0).toString());
+        _parseSumResult(todayCollectionResult.first['total']);
 
     return {
       'totalGiven': totalGiven,
@@ -1290,20 +1451,93 @@ class DatabaseService {
   }
 
   // Backup and restore
+  /// Exports ALL data (including soft-deleted records) as JSON string.
+  /// This ensures a complete backup that preserves the full database state.
+  /// **Memory Note**: For large datasets (thousands of records), this loads
+  /// all data into memory. Use [exportDataChunked] for streaming export.
   Future<String> exportData() async {
     final db = await database;
 
-    // Get all data
-    final customers = await db.query('customers', where: 'is_active = 1');
-    final loans = await db.query('loans', where: 'is_active = 1');
-    final payments = await db.query('payments', where: 'is_active = 1');
+    // Export ALL records (including soft-deleted) for complete backup
+    final customers = await db.query('customers');
+    final loans = await db.query('loans');
+    final payments = await db.query('payments');
 
-    return {
+    return jsonEncode({
       'customers': customers,
       'loans': loans,
       'payments': payments,
       'exportDate': DateTime.now().toIso8601String(),
-    }.toString();
+    });
+  }
+
+  /// Exports data in chunks to a file to avoid memory issues with large datasets.
+  /// Returns the path to the exported file.
+  Future<String> exportDataChunked(String filePath) async {
+    final db = await database;
+    final file = File(filePath);
+    final sink = file.openWrite();
+    const chunkSize = 500;
+
+    try {
+      sink.write('{"exportDate":"${DateTime.now().toIso8601String()}",');
+
+      // Export customers in chunks (ALL records for complete backup)
+      sink.write('"customers":[');
+      int offset = 0;
+      bool firstCustomer = true;
+      while (true) {
+        final chunk = await db.query('customers',
+            limit: chunkSize, offset: offset);
+        if (chunk.isEmpty) break;
+        for (final row in chunk) {
+          if (!firstCustomer) sink.write(',');
+          sink.write(jsonEncode(row));
+          firstCustomer = false;
+        }
+        offset += chunkSize;
+      }
+      sink.write('],');
+
+      // Export loans in chunks
+      sink.write('"loans":[');
+      offset = 0;
+      bool firstLoan = true;
+      while (true) {
+        final chunk = await db.query('loans',
+            limit: chunkSize, offset: offset);
+        if (chunk.isEmpty) break;
+        for (final row in chunk) {
+          if (!firstLoan) sink.write(',');
+          sink.write(jsonEncode(row));
+          firstLoan = false;
+        }
+        offset += chunkSize;
+      }
+      sink.write('],');
+
+      // Export payments in chunks
+      sink.write('"payments":[');
+      offset = 0;
+      bool firstPayment = true;
+      while (true) {
+        final chunk = await db.query('payments',
+            limit: chunkSize, offset: offset);
+        if (chunk.isEmpty) break;
+        for (final row in chunk) {
+          if (!firstPayment) sink.write(',');
+          sink.write(jsonEncode(row));
+          firstPayment = false;
+        }
+        offset += chunkSize;
+      }
+      sink.write(']}');
+
+      await sink.flush();
+      return filePath;
+    } finally {
+      await sink.close();
+    }
   }
 
   // Close database
@@ -1315,28 +1549,158 @@ class DatabaseService {
     }
   }
 
-  /// Restore database from a backup file
+  /// Restore database from a backup file.
+  /// Supports ALL database versions (v1 through v$currentVersion) — old versions
+  /// are automatically migrated to the latest schema via _upgradeDatabase().
+  ///
+  /// On failure, check [lastRestoreError] for a user-friendly error message.
   Future<bool> restoreFromFile(String backupPath) async {
+    _lastRestoreError = null;
+    String? safetyBackupPath;
+
     try {
-      // Close current database
+      final backupFile = File(backupPath);
+      if (!await backupFile.exists()) {
+        _lastRestoreError = 'Backup file not found.';
+        debugPrint('Restore: backup file does not exist');
+        return false;
+      }
+
+      // Step 1: Validate SQLite magic header before touching live DB
+      if (!await _isValidSqliteFile(backupPath)) {
+        _lastRestoreError = 'This file is not a valid database backup.';
+        debugPrint('Restore: file is not a valid SQLite database');
+        return false;
+      }
+
+      // Step 2: Check backup version
+      final backupVersion = await _readDatabaseVersion(backupPath);
+      if (backupVersion > currentVersion) {
+        _lastRestoreError =
+            'This backup was created by a newer version of the app '
+            '(database v$backupVersion). Please update the app to the latest '
+            'version and try again.';
+        debugPrint(
+            'Restore: backup version $backupVersion is newer than app ($currentVersion).');
+        return false;
+      }
+      if (backupVersion < 1) {
+        _lastRestoreError =
+            'This backup file has an invalid database version ($backupVersion). '
+            'The file may be corrupted.';
+        debugPrint('Restore: invalid backup version $backupVersion');
+        return false;
+      }
+
+      debugPrint('Restore: backup version $backupVersion → will migrate to v$currentVersion');
+
+      // Step 3: Close current database
       await close();
 
-      // Get current database path
       final dbPath = await getDatabasePath();
 
-      // Copy backup file to database location
-      final backupFile = File(backupPath);
-      if (await backupFile.exists()) {
-        await backupFile.copy(dbPath);
-
-        // Reinitialize database
-        _database = await _initializeDatabase();
-        return true;
+      // Step 4: Create safety backup of current DB before replacing
+      final currentDb = File(dbPath);
+      if (await currentDb.exists()) {
+        final tempDir = await getTemporaryDirectory();
+        safetyBackupPath = join(tempDir.path,
+            'safety_backup_${DateTime.now().millisecondsSinceEpoch}.db');
+        await currentDb.copy(safetyBackupPath);
+        debugPrint('Safety backup created before restore');
       }
-      return false;
+
+      // Step 5: Delete stale WAL/SHM files — they belong to the old DB and
+      // must not be merged into the restored database.
+      await _deleteWalFiles(dbPath);
+
+      // Step 6: Copy the backup file over the current database
+      await backupFile.copy(dbPath);
+
+      // Step 7: Delete any WAL/SHM companions the backup file might have brought
+      await _deleteWalFiles(dbPath);
+
+      // Step 8: Reopen database — this triggers _upgradeDatabase() automatically
+      // when the backup has an older version than our current version.
+      _schemaEnsured = false;
+      _database = await _initializeDatabase();
+
+      // Step 9: Run schema checks to add any missing columns
+      await _ensureAllSchemas();
+
+      debugPrint('Database restored and migrated successfully (v$backupVersion → v$currentVersion)');
+
+      // Step 10: Clean up safety backup on success
+      if (safetyBackupPath != null) {
+        try {
+          await File(safetyBackupPath).delete();
+        } catch (_) {}
+      }
+
+      return true;
     } catch (e) {
-      debugPrint('Restore error: $e');
+      // Restore failed — try to rollback to safety backup
+      _lastRestoreError = 'Restore failed: ${e.toString().split(':').last.trim()}';
+      debugPrint('Restore error: $e (${e.runtimeType})');
+
+      if (safetyBackupPath != null) {
+        try {
+          final dbPath = await getDatabasePath();
+          await _deleteWalFiles(dbPath);
+          await File(safetyBackupPath).copy(dbPath);
+          _schemaEnsured = false;
+          _database = await _initializeDatabase();
+          debugPrint('Rolled back to safety backup after restore failure');
+        } catch (rollbackError) {
+          debugPrint('CRITICAL: Rollback also failed: $rollbackError');
+          _lastRestoreError =
+              'Restore failed and rollback also failed. '
+              'Please reinstall the app and restore from Google Drive.';
+        }
+      }
+
       return false;
+    }
+  }
+
+  /// Delete SQLite WAL and SHM companion files if they exist.
+  Future<void> _deleteWalFiles(String dbPath) async {
+    for (final suffix in ['-wal', '-shm']) {
+      try {
+        final f = File('$dbPath$suffix');
+        if (await f.exists()) {
+          await f.delete();
+          debugPrint('Deleted stale $suffix file');
+        }
+      } catch (_) {}
+    }
+  }
+
+  /// Check whether a file starts with the SQLite magic header bytes.
+  Future<bool> _isValidSqliteFile(String path) async {
+    try {
+      final file = File(path);
+      final bytes = await file.openRead(0, 16).first;
+      // SQLite files start with "SQLite format 3\000"
+      const magic = [83, 81, 76, 105, 116, 101, 32, 102, 111, 114, 109, 97, 116, 32, 51, 0];
+      if (bytes.length < 16) return false;
+      for (int i = 0; i < 16; i++) {
+        if (bytes[i] != magic[i]) return false;
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Read the user_version pragma from a SQLite file without migrating it.
+  Future<int> _readDatabaseVersion(String path) async {
+    try {
+      final db = await openDatabase(path, readOnly: true);
+      final version = await db.getVersion();
+      await db.close();
+      return version;
+    } catch (_) {
+      return -1;
     }
   }
 
@@ -1357,19 +1721,219 @@ class DatabaseService {
     return result.first['count'] as int;
   }
 
+  /// Get count of active payments (fast count query for telemetry)
+  Future<int> getPaymentCount() async {
+    final db = await database;
+    final result = await db.rawQuery(
+        'SELECT COUNT(*) as count FROM payments WHERE is_active = 1');
+    return result.first['count'] as int? ?? 0;
+  }
+
+  // ============================================================
+  // TELEMETRY AGGREGATES - For admin dashboard statistics
+  // ============================================================
+
+  /// Get count of active loans (status = active or overdue)
+  Future<int> getActiveLoanCount() async {
+    final db = await database;
+    final result = await db.rawQuery(
+        'SELECT COUNT(*) as count FROM loans WHERE is_active = 1 AND status IN (?, ?)',
+        [LoanStatus.active.index, LoanStatus.overdue.index]);
+    return result.first['count'] as int? ?? 0;
+  }
+
+  /// Get count of overdue loans
+  Future<int> getOverdueLoanCount() async {
+    final db = await database;
+    final result = await db.rawQuery(
+        'SELECT COUNT(*) as count FROM loans WHERE is_active = 1 AND status = ?',
+        [LoanStatus.overdue.index]);
+    return result.first['count'] as int? ?? 0;
+  }
+
+  /// Get total principal outstanding (remaining principal on active loans)
+  Future<Decimal> getTotalPrincipalOutstanding() async {
+    final db = await database;
+    final rows = await db.rawQuery(
+        'SELECT remaining_amount FROM loans WHERE is_active = 1 AND status IN (?, ?)',
+        [LoanStatus.active.index, LoanStatus.overdue.index]);
+    
+    Decimal total = Decimal.zero;
+    for (final row in rows) {
+      final value = row['remaining_amount'];
+      if (value != null) {
+        total += Decimal.tryParse(value.toString()) ?? Decimal.zero;
+      }
+    }
+    return total;
+  }
+
+  /// Get total interest outstanding (for monthly interest loans)
+  Future<Decimal> getTotalInterestOutstanding() async {
+    final db = await database;
+    // For monthly interest loans, calculate unpaid interest based on loan duration
+    // For regular loans, interest is included in total_amount
+    final rows = await db.rawQuery('''
+      SELECT loan_type, monthly_interest_amount, total_amount, paid_amount, remaining_amount
+      FROM loans 
+      WHERE is_active = 1 AND status IN (?, ?)
+    ''', [LoanStatus.active.index, LoanStatus.overdue.index]);
+    
+    Decimal totalInterest = Decimal.zero;
+    for (final row in rows) {
+      final loanType = row['loan_type'] as int? ?? 0;
+      if (loanType == 1) {
+        // Monthly interest loan - calculate based on monthly_interest_amount
+        final monthlyInterest = Decimal.tryParse(row['monthly_interest_amount']?.toString() ?? '0') ?? Decimal.zero;
+        totalInterest += monthlyInterest; // Current month's interest
+      }
+      // Note: For regular loans, interest is included in remaining_amount (principal + interest combined)
+      // We don't separate it here as it's already accounted for in getTotalPrincipalOutstanding
+    }
+    return totalInterest;
+  }
+
+  /// Get total collections for the current month (bounded to exclude future months)
+  Future<Decimal> getMonthlyCollectionThisMonth() async {
+    final db = await database;
+    final now = DateTime.now();
+    final startOfMonth = DateTime(now.year, now.month, 1);
+    final startOfNextMonth = DateTime(now.year, now.month + 1, 1);
+    
+    final rows = await db.rawQuery(
+        'SELECT amount FROM payments WHERE is_active = 1 AND payment_date >= ? AND payment_date < ?',
+        [startOfMonth.toIso8601String().split('T')[0], startOfNextMonth.toIso8601String().split('T')[0]]);
+    
+    Decimal total = Decimal.zero;
+    for (final row in rows) {
+      final value = row['amount'];
+      if (value != null) {
+        total += Decimal.tryParse(value.toString()) ?? Decimal.zero;
+      }
+    }
+    return total;
+  }
+
+  /// Get loan count breakdown by type (regular, monthly_interest, reducing)
+  Future<Map<String, int>> getLoanTypeBreakdown() async {
+    final db = await database;
+    final result = await db.rawQuery('''
+      SELECT loan_type, COUNT(*) as count 
+      FROM loans 
+      WHERE is_active = 1 AND status IN (?, ?)
+      GROUP BY loan_type
+    ''', [LoanStatus.active.index, LoanStatus.overdue.index]);
+    
+    final breakdown = <String, int>{
+      'regular': 0,
+      'monthly_interest': 0,
+      'reducing': 0,
+    };
+    
+    for (final row in result) {
+      final loanType = row['loan_type'] as int? ?? 0;
+      final count = row['count'] as int? ?? 0;
+      switch (loanType) {
+        case 0:
+          breakdown['regular'] = count;
+          break;
+        case 1:
+          breakdown['monthly_interest'] = count;
+          break;
+        case 2:
+          breakdown['reducing'] = count;
+          break;
+      }
+    }
+    return breakdown;
+  }
+
+  /// Get comprehensive telemetry stats for admin dashboard
+  /// Optimized: Uses a single query with subqueries to reduce DB round-trips
+  Future<Map<String, dynamic>> getTelemetryStats() async {
+    final db = await database;
+    final now = DateTime.now();
+    final startOfMonth = DateTime(now.year, now.month, 1).toIso8601String().split('T')[0];
+    final startOfNextMonth = DateTime(now.year, now.month + 1, 1).toIso8601String().split('T')[0];
+
+    // Single optimized query that fetches all stats in one DB round-trip
+    final result = await db.rawQuery('''
+      SELECT
+        (SELECT COUNT(*) FROM customers WHERE is_active = 1) as customerCount,
+        (SELECT COUNT(*) FROM loans WHERE is_active = 1 AND status NOT IN (?, ?)) as loanCount,
+        (SELECT COUNT(*) FROM loans WHERE is_active = 1 AND status IN (?, ?)) as activeLoanCount,
+        (SELECT COUNT(*) FROM loans WHERE is_active = 1 AND status = ?) as overdueLoanCount,
+        (SELECT COUNT(*) FROM payments WHERE is_active = 1) as paymentCount,
+        (SELECT COALESCE(SUM(CAST(remaining_amount AS REAL)), 0) FROM loans WHERE is_active = 1 AND status IN (?, ?)) as totalOutstanding,
+        (SELECT COALESCE(SUM(CAST(monthly_interest_amount AS REAL)), 0) FROM loans WHERE is_active = 1 AND loan_type = 1 AND status IN (?, ?)) as monthlyInterestDue,
+        (SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) FROM payments WHERE is_active = 1 AND payment_date >= ? AND payment_date < ?) as monthlyCollection
+    ''', [
+      LoanStatus.cancelled.index, LoanStatus.closed.index,        // loanCount
+      LoanStatus.active.index, LoanStatus.overdue.index,           // activeLoanCount
+      LoanStatus.overdue.index,                                    // overdueLoanCount
+      LoanStatus.active.index, LoanStatus.overdue.index,           // totalOutstanding
+      LoanStatus.active.index, LoanStatus.overdue.index,           // monthlyInterestDue
+      startOfMonth, startOfNextMonth,                              // monthlyCollection (bounded)
+    ]);
+
+    final row = result.first;
+
+    // Loan type breakdown still needs a separate group-by query (but just one)
+    final loanTypeResult = await db.rawQuery('''
+      SELECT loan_type, COUNT(*) as count
+      FROM loans
+      WHERE is_active = 1 AND status IN (?, ?)
+      GROUP BY loan_type
+    ''', [LoanStatus.active.index, LoanStatus.overdue.index]);
+
+    final breakdown = <String, int>{'regular': 0, 'monthly_interest': 0, 'reducing': 0};
+    for (final r in loanTypeResult) {
+      final loanType = r['loan_type'] as int? ?? 0;
+      final count = r['count'] as int? ?? 0;
+      switch (loanType) {
+        case 0: breakdown['regular'] = count; break;
+        case 1: breakdown['monthly_interest'] = count; break;
+        case 2: breakdown['reducing'] = count; break;
+      }
+    }
+
+    return {
+      'customerCount': row['customerCount'] as int? ?? 0,
+      'loanCount': row['loanCount'] as int? ?? 0,
+      'activeLoanCount': row['activeLoanCount'] as int? ?? 0,
+      'overdueLoanCount': row['overdueLoanCount'] as int? ?? 0,
+      'paymentCount': row['paymentCount'] as int? ?? 0,
+      'totalOutstanding': (row['totalOutstanding'] as num?)?.toDouble() ?? 0.0,
+      'monthlyInterestDue': (row['monthlyInterestDue'] as num?)?.toDouble() ?? 0.0,
+      'monthlyCollectionThisMonth': (row['monthlyCollection'] as num?)?.toDouble() ?? 0.0,
+      'loanTypeBreakdown': breakdown,
+    };
+  }
+
   /// Delete a loan (soft delete)
-  /// NOTE: This only soft-deletes the loan itself.
-  /// To also delete payments, use LoanProvider.deleteLoan() which handles both.
-  /// This ensures data integrity and only affects the specific loan ID.
+  /// This also soft-deletes all payments for this loan to maintain data consistency.
   Future<int> deleteLoan(int id) async {
     final db = await database;
-    return await db.update(
-      'loans',
-      {'is_active': 0, 'updated_at': DateTime.now().toIso8601String()},
-      where:
-          'id = ?', // Scoped to specific loan ID - other loans remain untouched
-      whereArgs: [id],
-    );
+    final now = DateTime.now().toIso8601String();
+
+    // Use transaction to ensure both loan and payments are soft-deleted together
+    return await db.transaction((txn) async {
+      // Soft-delete all payments for this loan
+      await txn.update(
+        'payments',
+        {'is_active': 0, 'updated_at': now},
+        where: 'loan_id = ?',
+        whereArgs: [id],
+      );
+
+      // Soft-delete the loan itself
+      return await txn.update(
+        'loans',
+        {'is_active': 0, 'updated_at': now},
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+    });
   }
 
   // Additional methods
@@ -1412,7 +1976,8 @@ class DatabaseService {
       debugPrint('DEBUG: insertPayment result ID: $insertResult');
       return insertResult;
     } catch (e) {
-      debugPrint('DEBUG: insertPayment error: $e');
+      // Log only error type to avoid exposing PII in exception messages
+      debugPrint('DEBUG: insertPayment error type: ${e.runtimeType}');
       rethrow;
     }
   }
@@ -1520,6 +2085,7 @@ class DatabaseService {
   }
 
   /// Get loans with their payments loaded (for home page display)
+  /// Optimized to use a single bulk query instead of N+1 individual queries
   Future<List<Loan>> getAllLoansWithPayments() async {
     final db = await database;
     // Use simple query to get all active loans - don't filter by customer join
@@ -1531,17 +2097,60 @@ class DatabaseService {
       orderBy: 'due_date ASC',
     );
 
-    List<Loan> loans = [];
-    for (final map in loanMaps) {
-      final loan = Loan.fromMap(map);
-      final payments = await getPaymentsForLoan(loan.id!);
-      loans.add(loan.copyWith(payments: payments));
+    if (loanMaps.isEmpty) {
+      return [];
     }
-    debugPrint('📋 Loaded ${loans.length} loans from database');
+
+    // Extract all loan IDs for bulk payment query
+    final loanIds = loanMaps.map((m) => m['id'] as int).toList();
+
+    // Batch loanIds to avoid SQLite parameter limit (max ~999 params)
+    const batchSize = 900;
+    final List<Map<String, dynamic>> allPayments = [];
+
+    for (int i = 0; i < loanIds.length; i += batchSize) {
+      final batch = loanIds.skip(i).take(batchSize).toList();
+      final placeholders = List.filled(batch.length, '?').join(', ');
+
+      final batchPayments = await db.rawQuery(
+        'SELECT * FROM payments WHERE loan_id IN ($placeholders) AND is_active = 1',
+        batch,
+      );
+      allPayments.addAll(batchPayments);
+    }
+
+    // Sort all payments by payment_date DESC (since we batched, need to re-sort)
+    allPayments.sort((a, b) {
+      final dateA = a['payment_date'] as String?;
+      final dateB = b['payment_date'] as String?;
+      if (dateA == null && dateB == null) return 0;
+      if (dateA == null) return 1;
+      if (dateB == null) return -1;
+      return dateB.compareTo(dateA); // DESC order
+    });
+
+    // Group payments by loan_id in memory
+    final paymentsByLoanId = <int, List<Payment>>{};
+    for (final paymentMap in allPayments) {
+      final payment = Payment.fromMap(paymentMap);
+      final loanId = paymentMap['loan_id'] as int;
+      paymentsByLoanId.putIfAbsent(loanId, () => []).add(payment);
+    }
+
+    // Build loans with their payments
+    final loans = loanMaps.map((map) {
+      final loan = Loan.fromMap(map);
+      final payments = paymentsByLoanId[loan.id] ?? [];
+      return loan.copyWith(payments: payments);
+    }).toList();
+
+    debugPrint('📋 Loaded ${loans.length} loans with payments (bulk query)');
     return loans;
   }
 
   /// Update all existing loans to fix tenure from 12 to 10 weeks
+  /// **Business Logic Note**: This is a data correction/migration operation.
+  /// Ideally, such business rules should be in a LoanService/BusinessLogic layer.
   Future<int> fixExistingLoansTenure() async {
     final db = await database;
     return await db.rawUpdate('''
@@ -1572,7 +2181,8 @@ class DatabaseService {
 
       debugPrint('Database completely cleared and reset');
     } catch (e) {
-      debugPrint('Error clearing database: $e');
+      // Log only error type to avoid exposing sensitive data
+      debugPrint('Error clearing database: ${e.runtimeType}');
       rethrow;
     }
   }
@@ -1611,7 +2221,7 @@ class DatabaseService {
     final db = await database;
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
-    
+
     // Delete reminders that are:
     // 1. Completed (is_completed = 1) OR
     // 2. Inactive (is_active = 0) AND scheduled for before today
@@ -1626,11 +2236,11 @@ class DatabaseService {
         startOfToday.toIso8601String(),
       ],
     );
-    
+
     if (deletedCount > 0) {
       debugPrint('🧹 DatabaseService: Cleaned up $deletedCount past reminders');
     }
-    
+
     return deletedCount;
   }
 

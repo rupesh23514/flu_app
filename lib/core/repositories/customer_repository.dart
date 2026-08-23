@@ -54,7 +54,8 @@ class CustomerRepository extends BaseRepository {
       List<dynamic> whereArgs = [];
 
       if (searchQuery != null && searchQuery.isNotEmpty) {
-        whereClause += ' AND (LOWER(name) LIKE ? OR phone_number LIKE ? OR alternate_phone LIKE ?)';
+        whereClause +=
+            ' AND (LOWER(name) LIKE ? OR phone_number LIKE ? OR alternate_phone LIKE ?)';
         final searchPattern = '%${searchQuery.toLowerCase()}%';
         whereArgs.addAll([searchPattern, '%$searchQuery%', '%$searchQuery%']);
       }
@@ -170,12 +171,75 @@ class CustomerRepository extends BaseRepository {
         whereArgs: [customerId],
       );
 
+      // Remove from all groups
+      await txn.delete(
+        'customer_group_members',
+        where: 'customer_id = ?',
+        whereArgs: [customerId],
+      );
+
       // Delete the customer
       await txn.delete(
         'customers',
         where: 'id = ?',
         whereArgs: [customerId],
       );
+    });
+  }
+
+  /// Bulk delete customers and all related data atomically
+  /// Uses a single transaction to avoid N+1 database calls and ensure consistency
+  /// Returns the number of successfully deleted customers
+  /// Handles large lists by chunking to avoid SQLite's max parameter limit
+  static const int _maxSqlParams = 900; // Safe limit below SQLite's 999
+
+  Future<Result<int>> bulkDeleteEntirely(List<int> customerIds) async {
+    if (customerIds.isEmpty) {
+      return const Success(0);
+    }
+
+    return safeTransaction((txn) async {
+      int totalDeleted = 0;
+
+      // Process in chunks to avoid SQLite parameter limit
+      for (int i = 0; i < customerIds.length; i += _maxSqlParams) {
+        final chunk = customerIds.skip(i).take(_maxSqlParams).toList();
+        final placeholders = List.filled(chunk.length, '?').join(', ');
+
+        // Delete all payments for these customers' loans
+        await txn.rawDelete(
+          'DELETE FROM payments WHERE customer_id IN ($placeholders)',
+          chunk,
+        );
+
+        // Delete all loans for these customers
+        await txn.rawDelete(
+          'DELETE FROM loans WHERE customer_id IN ($placeholders)',
+          chunk,
+        );
+
+        // Delete all reminders for these customers
+        await txn.rawDelete(
+          'DELETE FROM reminders WHERE customer_id IN ($placeholders)',
+          chunk,
+        );
+
+        // Remove from all groups
+        await txn.rawDelete(
+          'DELETE FROM customer_group_members WHERE customer_id IN ($placeholders)',
+          chunk,
+        );
+
+        // Delete the customers
+        final deletedCount = await txn.rawDelete(
+          'DELETE FROM customers WHERE id IN ($placeholders)',
+          chunk,
+        );
+
+        totalDeleted += deletedCount;
+      }
+
+      return totalDeleted;
     });
   }
 
@@ -186,7 +250,7 @@ class CustomerRepository extends BaseRepository {
       final result = await db.rawQuery(
         'SELECT COUNT(*) as count FROM customers WHERE is_active = 1',
       );
-      return result.first['count'] as int;
+      return Sqflite.firstIntValue(result) ?? 0;
     });
   }
 
@@ -253,7 +317,7 @@ class CustomerRepository extends BaseRepository {
         where: 'group_id = ?',
         whereArgs: [id],
       );
-      
+
       // Then soft delete the group
       return await txn.update(
         'customer_groups',

@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:decimal/decimal.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../core/services/phone_call_helper.dart';
 import '../../../shared/models/customer.dart';
 import '../../../shared/models/loan.dart';
 import '../../../shared/models/payment.dart';
@@ -34,6 +35,9 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
   Customer? _customer;
   List<Loan> _customerLoans = [];
   bool _isLoading = true;
+  // Tracks whether any data was modified; popped to caller so group list
+  // can skip a reload when nothing changed (preserving scroll position).
+  bool _dataChanged = false;
 
   @override
   void initState() {
@@ -69,6 +73,10 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
     });
   }
 
+  Future<void> _handleCallCustomer(Customer customer) async {
+    await PhoneCallHelper.handleCall(context, customer);
+  }
+
   Future<void> _updateCustomerLocation() async {
     final result = await Navigator.push<Map<String, double>>(
       context,
@@ -82,8 +90,9 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
     );
 
     if (result != null && _customer != null && mounted) {
-      final customerProvider = Provider.of<CustomerProvider>(context, listen: false);
-      
+      final customerProvider =
+          Provider.of<CustomerProvider>(context, listen: false);
+
       // Update customer with new location
       final updatedCustomer = Customer(
         id: _customer!.id,
@@ -106,6 +115,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
             backgroundColor: Colors.green,
           ),
         );
+        _dataChanged = true;
         await _loadData();
       } else if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -133,7 +143,8 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                   color: Colors.blue.shade50,
                   borderRadius: BorderRadius.circular(8),
                 ),
-                child: Icon(Icons.calendar_view_week, color: Colors.blue.shade700),
+                child:
+                    Icon(Icons.calendar_view_week, color: Colors.blue.shade700),
               ),
               title: const Text('Weekly Loan'),
               subtitle: const Text('Weekly payment schedule'),
@@ -216,7 +227,8 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                     color: AppColors.primary.withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: const Icon(Icons.person_outline, color: AppColors.primary),
+                  child: const Icon(Icons.person_outline,
+                      color: AppColors.primary),
                 ),
                 title: const Text('Customer Details'),
                 subtitle: const Text('Edit name, phone, address, etc.'),
@@ -235,10 +247,10 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                 final isMonthly = loan.isMonthlyInterest;
                 final loanColor = isMonthly ? Colors.orange : AppColors.primary;
                 final loanLabel = isMonthly ? 'Monthly' : 'Weekly';
-                final bookLabel = loan.bookNo != null && loan.bookNo!.isNotEmpty 
-                    ? ' - Book: ${loan.bookNo}' 
+                final bookLabel = loan.bookNo != null && loan.bookNo!.isNotEmpty
+                    ? ' - Book: ${loan.bookNo}'
                     : '';
-                
+
                 return ListTile(
                   leading: Container(
                     padding: const EdgeInsets.all(8),
@@ -247,7 +259,9 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Icon(
-                      isMonthly ? Icons.calendar_month : Icons.calendar_view_week,
+                      isMonthly
+                          ? Icons.calendar_month
+                          : Icons.calendar_view_week,
                       color: loanColor,
                     ),
                   ),
@@ -329,7 +343,8 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
   }
 
   Future<void> _showEditPrincipalDialog(Loan loan) async {
-    final controller = TextEditingController(text: loan.principal.toStringAsFixed(0));
+    final controller =
+        TextEditingController(text: loan.principal.toStringAsFixed(0));
     final result = await showDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -357,30 +372,34 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
         ],
       ),
     );
-    
+
     if (result != null && result.isNotEmpty && mounted) {
       final newPrincipal = Decimal.tryParse(result);
       if (newPrincipal != null && newPrincipal > Decimal.zero) {
         final loanProvider = Provider.of<LoanProvider>(context, listen: false);
-        
+
         // Calculate new remaining amount
         final newRemaining = newPrincipal - loan.totalPaid;
-        final actualRemaining = newRemaining > Decimal.zero ? newRemaining : Decimal.zero;
-        
+        final actualRemaining =
+            newRemaining > Decimal.zero ? newRemaining : Decimal.zero;
+
         final updatedLoan = loan.copyWith(
           principal: newPrincipal,
           totalAmount: newPrincipal, // For weekly loans, total = principal
           remainingAmount: actualRemaining,
           updatedAt: DateTime.now(),
         );
-        
+
         final success = await loanProvider.updateLoan(updatedLoan);
+        _dataChanged = true;
         await _loadData();
-        
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(success ? 'Principal amount updated to ₹$result' : 'Failed to update'),
+              content: Text(success
+                  ? 'Principal amount updated to ₹$result'
+                  : 'Failed to update'),
               backgroundColor: success ? Colors.green : Colors.red,
               behavior: SnackBarBehavior.floating,
             ),
@@ -432,24 +451,27 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
         ],
       ),
     );
-    
+
     if (result != null && result.isNotEmpty && mounted) {
       final newInterest = Decimal.tryParse(result);
       if (newInterest != null && newInterest >= Decimal.zero) {
         final loanProvider = Provider.of<LoanProvider>(context, listen: false);
-        
+
         final updatedLoan = loan.copyWith(
           monthlyInterestAmount: newInterest,
           updatedAt: DateTime.now(),
         );
-        
+
         final success = await loanProvider.updateLoan(updatedLoan);
+        _dataChanged = true;
         await _loadData();
-        
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(success ? 'Monthly interest updated to ₹$result' : 'Failed to update'),
+              content: Text(success
+                  ? 'Monthly interest updated to ₹$result'
+                  : 'Failed to update'),
               backgroundColor: success ? Colors.green : Colors.red,
               behavior: SnackBarBehavior.floating,
             ),
@@ -485,7 +507,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
         ],
       ),
     );
-    
+
     if (result != null && mounted) {
       final loanProvider = Provider.of<LoanProvider>(context, listen: false);
       final updatedLoan = loan.copyWith(
@@ -493,10 +515,13 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
         updatedAt: DateTime.now(),
       );
       await loanProvider.updateLoan(updatedLoan);
+      _dataChanged = true;
       await _loadData();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Book number updated'), behavior: SnackBarBehavior.floating),
+          const SnackBar(
+              content: Text('Book number updated'),
+              behavior: SnackBarBehavior.floating),
         );
       }
     }
@@ -509,7 +534,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
       firstDate: DateTime(2000), // Allow any past date
       lastDate: DateTime(2100), // Allow any future date
     );
-    
+
     if (picked != null && mounted) {
       final loanProvider = Provider.of<LoanProvider>(context, listen: false);
       final updatedLoan = loan.copyWith(
@@ -517,10 +542,13 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
         updatedAt: DateTime.now(),
       );
       await loanProvider.updateLoan(updatedLoan);
+      _dataChanged = true;
       await _loadData();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Loan date updated'), behavior: SnackBarBehavior.floating),
+          const SnackBar(
+              content: Text('Loan date updated'),
+              behavior: SnackBarBehavior.floating),
         );
       }
     }
@@ -654,7 +682,8 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                       style: TextStyle(fontWeight: FontWeight.w600),
                     ),
                     subtitle: const Text('Remove customer and all their data'),
-                    secondary: const Icon(Icons.person_remove, color: AppColors.error),
+                    secondary:
+                        const Icon(Icons.person_remove, color: AppColors.error),
                     contentPadding: EdgeInsets.zero,
                   ),
                   if (selectedLoanIds.isNotEmpty) ...[
@@ -667,7 +696,8 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                       ),
                       child: Row(
                         children: [
-                          const Icon(Icons.warning_amber, color: AppColors.error, size: 16),
+                          const Icon(Icons.warning_amber,
+                              color: AppColors.error, size: 16),
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
@@ -738,8 +768,10 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
             ),
           );
           if (shouldDeleteCustomer) {
-            Navigator.of(context).pop();
+            _dataChanged = true;
+            Navigator.of(context).pop(_dataChanged);
           } else {
+            _dataChanged = true;
             await _loadData(); // Refresh the screen
           }
         }
@@ -809,12 +841,31 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
       );
     }
 
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && mounted) {
+          Navigator.of(context).pop(_dataChanged);
+        }
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: Text(_customer!.name),
         backgroundColor: AppColors.primary,
         foregroundColor: Colors.white,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => Navigator.of(context).pop(_dataChanged),
+        ),
         actions: [
+          // Call customer directly from this screen
+          IconButton(
+            icon: const Icon(Icons.phone),
+            tooltip: 'Call customer',
+            onPressed: _customer != null
+                ? () => _handleCallCustomer(_customer!)
+                : null,
+          ),
           IconButton(
             icon: const Icon(Icons.edit),
             onPressed: _showEditSelectionDialog,
@@ -842,7 +893,8 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
           _buildPaymentsTab(),
         ],
       ),
-    );
+      ),  // end Scaffold
+    );  // end PopScope
   }
 
   Widget _buildOverviewTab() {
@@ -950,13 +1002,17 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                               TextButton.icon(
                                 onPressed: () => _updateCustomerLocation(),
                                 icon: Icon(
-                                  _customer!.hasLocation ? Icons.edit_location_alt : Icons.add_location_alt,
+                                  _customer!.hasLocation
+                                      ? Icons.edit_location_alt
+                                      : Icons.add_location_alt,
                                   size: 18,
                                 ),
-                                label: Text(_customer!.hasLocation ? 'Update' : 'Add'),
+                                label: Text(
+                                    _customer!.hasLocation ? 'Update' : 'Add'),
                                 style: TextButton.styleFrom(
                                   foregroundColor: AppColors.primary,
-                                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                                  padding:
+                                      const EdgeInsets.symmetric(horizontal: 8),
                                 ),
                               ),
                             ],
@@ -992,11 +1048,13 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                                 child: Column(
                                   mainAxisAlignment: MainAxisAlignment.center,
                                   children: [
-                                    Icon(Icons.location_off, color: Colors.grey.shade400, size: 32),
+                                    Icon(Icons.location_off,
+                                        color: Colors.grey.shade400, size: 32),
                                     const SizedBox(height: 8),
                                     Text(
                                       'No location saved',
-                                      style: TextStyle(color: Colors.grey.shade600),
+                                      style: TextStyle(
+                                          color: Colors.grey.shade600),
                                     ),
                                   ],
                                 ),
@@ -1040,8 +1098,6 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
             ..._customerLoans.map((loan) => _buildIndividualLoanCard(loan)),
             const SizedBox(height: 16),
           ],
-
-
         ],
       ),
     );
@@ -1147,7 +1203,8 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                         if (loan.bookNo != null && loan.bookNo!.isNotEmpty) ...[
                           const SizedBox(width: 8),
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(
                               color: Colors.grey.withValues(alpha: 0.15),
                               borderRadius: BorderRadius.circular(6),
@@ -1155,7 +1212,8 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                const Icon(Icons.menu_book, size: 12, color: AppColors.textSecondary),
+                                const Icon(Icons.menu_book,
+                                    size: 12, color: AppColors.textSecondary),
                                 const SizedBox(width: 4),
                                 Text(
                                   loan.bookNo!,
@@ -1173,7 +1231,8 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                     ),
                     // Loan Start Date - placed between book/status
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
                         color: Colors.purple.withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(6),
@@ -1181,7 +1240,8 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.calendar_today, size: 10, color: Colors.purple.shade700),
+                          Icon(Icons.calendar_today,
+                              size: 10, color: Colors.purple.shade700),
                           const SizedBox(width: 4),
                           Text(
                             DateFormat('dd/MM/yy').format(loan.loanDate),
@@ -1312,6 +1372,38 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
   }
 
   Widget _buildPaymentItem(Payment payment, int loanId) {
+    // Parse notes to extract interest/principal breakdown if present
+    double? interestAmount;
+    double? principalAmount;
+    String? additionalNotes;
+
+    if (payment.notes != null && payment.notes!.isNotEmpty) {
+      final interestMatch =
+          RegExp(r'Interest:\s*₹?(\d+(?:\.\d+)?)', caseSensitive: false)
+              .firstMatch(payment.notes!);
+      final principalMatch =
+          RegExp(r'Principal:\s*₹?(\d+(?:\.\d+)?)', caseSensitive: false)
+              .firstMatch(payment.notes!);
+
+      if (interestMatch != null) {
+        interestAmount = double.tryParse(interestMatch.group(1)!);
+      }
+      if (principalMatch != null) {
+        principalAmount = double.tryParse(principalMatch.group(1)!);
+      }
+
+      // Extract any additional notes (after the | separator)
+      final parts = payment.notes!.split('|');
+      if (parts.length > 2) {
+        additionalNotes = parts.sublist(2).join('|').trim();
+      } else if (interestAmount == null && principalAmount == null) {
+        additionalNotes = payment.notes;
+      }
+    }
+
+    final hasMonthlyBreakdown =
+        interestAmount != null || principalAmount != null;
+
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(10),
@@ -1322,21 +1414,22 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
       ),
       child: Row(
         children: [
-          // Rupee Icon
+          // Rupee Icon with color based on payment type
           Container(
             width: 36,
             height: 36,
             decoration: BoxDecoration(
-              color: Colors.green.withValues(alpha: 0.15),
+              color: (hasMonthlyBreakdown ? Colors.orange : Colors.green)
+                  .withValues(alpha: 0.15),
               borderRadius: BorderRadius.circular(18),
             ),
-            child: const Center(
+            child: Center(
               child: Text(
                 '₹',
                 style: TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
-                  color: Colors.green,
+                  color: hasMonthlyBreakdown ? Colors.orange : Colors.green,
                 ),
               ),
             ),
@@ -1385,8 +1478,68 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                     fontSize: 11,
                   ),
                 ),
-                // Display payment notes if available
-                if (payment.notes != null && payment.notes!.isNotEmpty) ...[
+                // Show interest/principal breakdown for monthly loans
+                if (hasMonthlyBreakdown) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      if (interestAmount != null && interestAmount > 0)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.percent,
+                                  size: 10, color: Colors.orange),
+                              const SizedBox(width: 2),
+                              Text(
+                                'Interest: ₹${interestAmount.toStringAsFixed(0)}',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.orange.shade700,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      if (principalAmount != null && principalAmount > 0)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.green.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.account_balance,
+                                  size: 10, color: Colors.green),
+                              const SizedBox(width: 2),
+                              Text(
+                                'Principal: ₹${principalAmount.toStringAsFixed(0)}',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.green.shade700,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+                // Display additional notes if available
+                if (additionalNotes != null && additionalNotes.isNotEmpty) ...[
                   const SizedBox(height: 4),
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1395,7 +1548,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                       const SizedBox(width: 4),
                       Expanded(
                         child: Text(
-                          payment.notes!,
+                          additionalNotes,
                           style: TextStyle(
                             color: Colors.grey[600],
                             fontSize: 11,
@@ -1527,7 +1680,8 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(Icons.menu_book, size: 12, color: AppColors.textSecondary),
+                            const Icon(Icons.menu_book,
+                                size: 12, color: AppColors.textSecondary),
                             const SizedBox(width: 4),
                             Text(
                               'Book: ${loan.bookNo}',
@@ -1593,17 +1747,47 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
-                      const Icon(Icons.percent, size: 14, color: Colors.orange),
-                      const SizedBox(width: 4),
-                      Text(
-                        'Monthly Interest: ₹${loan.monthlyInterestAmount!.toStringAsFixed(0)}',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.orange.shade700,
-                        ),
+                      // Monthly Interest Rate
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.percent,
+                              size: 14, color: Colors.orange),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Monthly: ₹${loan.monthlyInterestAmount!.toStringAsFixed(0)}',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.orange.shade700,
+                            ),
+                          ),
+                        ],
+                      ),
+                      // Divider
+                      Container(
+                        width: 1,
+                        height: 20,
+                        color: Colors.orange.withValues(alpha: 0.3),
+                      ),
+                      // Total Interest Collected
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.account_balance_wallet,
+                              size: 14, color: Colors.green.shade600),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Collected: ₹${(loan.totalInterestCollected ?? Decimal.zero).toStringAsFixed(0)}',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.green.shade700,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -1763,15 +1947,18 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
   }
 
   void _navigateToPaymentCollection(Loan loan) async {
-    await Navigator.push(
+    final result = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
         builder: (context) => PaymentCollectionScreenNew(loan: loan),
       ),
     );
 
-    // Refresh data after payment collection
-    await _loadData();
+    // result is true when a payment was actually saved
+    if (result == true) {
+      _dataChanged = true;
+      await _loadData();
+    }
   }
 
   Future<void> _showAddPaymentDialog(Loan loan) async {
@@ -2028,13 +2215,14 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
                 final scaffoldMessenger = ScaffoldMessenger.of(context);
                 final loanProvider =
                     Provider.of<LoanProvider>(context, listen: false);
-                
+
                 Navigator.pop(dialogContext);
 
                 final success =
                     await loanProvider.updatePayment(updatedPayment);
 
                 if (success && mounted) {
+                  _dataChanged = true;
                   await _loadData(); // Refresh the screen
                   scaffoldMessenger.showSnackBar(
                     const SnackBar(
@@ -2120,12 +2308,13 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen>
               final scaffoldMessenger = ScaffoldMessenger.of(context);
               final loanProvider =
                   Provider.of<LoanProvider>(context, listen: false);
-                  
+
               Navigator.pop(dialogContext);
 
               final success = await loanProvider.deletePayment(payment.id!);
 
               if (success && mounted) {
+                _dataChanged = true;
                 await _loadData(); // Refresh the screen
                 scaffoldMessenger.showSnackBar(
                   const SnackBar(

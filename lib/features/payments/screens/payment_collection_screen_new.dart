@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:decimal/decimal.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../core/services/phone_call_helper.dart';
 import '../../../shared/models/loan.dart';
 import '../../../shared/models/payment.dart';
 import '../../../shared/models/customer.dart';
@@ -46,6 +47,13 @@ class _PaymentCollectionScreenNewState extends State<PaymentCollectionScreenNew>
       final emiAmount = _calculateEMI();
       _amountController.text = emiAmount.toStringAsFixed(0);
     }
+    // Ensure customers are loaded (in case caller didn't preload them)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final customerProvider = Provider.of<CustomerProvider>(context, listen: false);
+      if (customerProvider.customers.isEmpty) {
+        customerProvider.loadCustomers();
+      }
+    });
   }
 
   double _calculateEMI() {
@@ -78,90 +86,119 @@ class _PaymentCollectionScreenNewState extends State<PaymentCollectionScreenNew>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Collect Payment'),
-      ),
-      body: Consumer<CustomerProvider>(
-        builder: (context, customerProvider, _) {
-          if (customerProvider.customers.isEmpty) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          final customer = customerProvider.customers.firstWhere(
-            (c) => c.id == widget.loan.customerId,
-            orElse: () => Customer(
-              id: 0,
-              name: 'Unknown Customer',
-              phoneNumber: '',
-              address: '',
-              createdAt: DateTime.now(),
-              updatedAt: DateTime.now(),
-            ),
-          );
-          
-          return Form(
-            key: _formKey,
-            child: ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                // Customer & Loan Info Card
-                _buildInfoCard(customer.name),
-                
-                const SizedBox(height: 24),
-                
-                // Different UI for monthly interest loans vs weekly loans
-                if (widget.loan.isMonthlyInterest) ...[
-                  // Monthly Interest Loan Collection UI
-                  _buildMonthlyInterestSection(),
-                ] else ...[
-                  // Weekly Loan Collection UI
-                  // Quick Amount Buttons
-                  _buildQuickAmountButtons(),
-                  
-                  const SizedBox(height: 24),
-                  
-                  // Amount Input
-                  _buildAmountInput(),
-                ],
-                
-                const SizedBox(height: 16),
-                
-                // Payment Date Picker (Mandatory)
-                _buildPaymentDatePicker(),
-                
-                const SizedBox(height: 16),
-                
-                // Payment Method
-                _buildPaymentMethodSection(),
-                
-                const SizedBox(height: 16),
-                
-                // Notes
-                TextFormField(
-                  controller: _notesController,
-                  maxLength: 100,
-                  decoration: const InputDecoration(
-                    labelText: 'Notes (Optional)',
-                    prefixIcon: Icon(Icons.note_outlined),
-                    hintText: 'Add payment notes',
-                    counterText: '',
-                  ),
-                  maxLines: 2,
+    return Consumer<CustomerProvider>(
+      builder: (context, customerProvider, _) {
+        // Look up customer — fall back to a placeholder if not yet loaded
+        final customer = customerProvider.customers.isNotEmpty
+            ? customerProvider.customers.firstWhere(
+                (c) => c.id == widget.loan.customerId,
+                orElse: () => Customer(
+                  id: 0,
+                  name: 'Loading...',
+                  phoneNumber: '',
+                  address: '',
+                  createdAt: DateTime.now(),
+                  updatedAt: DateTime.now(),
                 ),
-                
-                const SizedBox(height: 24),
-                
-                // Submit Button
-                _buildSubmitButton(),
-              ],
-            ),
-          );
-        },
-      ),
+              )
+            : Customer(
+                id: 0,
+                name: 'Loading...',
+                phoneNumber: '',
+                address: '',
+                createdAt: DateTime.now(),
+                updatedAt: DateTime.now(),
+              );
+
+        final isCustomerLoaded = customer.id != 0;
+
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Collect Payment'),
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.phone),
+                tooltip: 'Call customer',
+                onPressed: isCustomerLoaded
+                    ? () => _handleCallCustomer(customer)
+                    : null,
+              ),
+            ],
+          ),
+          body: !isCustomerLoaded
+              ? const Center(child: CircularProgressIndicator())
+              : Form(
+                  key: _formKey,
+                  child: ListView(
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      // Customer & Loan Info Card
+                      _buildInfoCard(customer),
+
+                      const SizedBox(height: 24),
+
+                      // Different UI for monthly interest loans vs weekly loans
+                      if (widget.loan.isMonthlyInterest) ...[
+                        // Monthly Interest Loan Collection UI
+                        _buildMonthlyInterestSection(),
+                      ] else ...[
+                        // Weekly Loan Collection UI
+                        // Quick Amount Buttons
+                        _buildQuickAmountButtons(),
+
+                        const SizedBox(height: 24),
+
+                        // Amount Input
+                        _buildAmountInput(),
+                      ],
+
+                      const SizedBox(height: 16),
+
+                      // Payment Date Picker (Mandatory)
+                      _buildPaymentDatePicker(),
+
+                      const SizedBox(height: 16),
+
+                      // Payment Method
+                      _buildPaymentMethodSection(),
+
+                      const SizedBox(height: 16),
+
+                      // Notes
+                      TextFormField(
+                        controller: _notesController,
+                        maxLength: 100,
+                        decoration: const InputDecoration(
+                          labelText: 'Notes (Optional)',
+                          prefixIcon: Icon(Icons.note_outlined),
+                          hintText: 'Add payment notes',
+                          counterText: '',
+                        ),
+                        maxLines: 2,
+                      ),
+
+                      const SizedBox(height: 24),
+
+                      // Submit Button
+                      _buildSubmitButton(),
+                    ],
+                  ),
+                ),
+        );
+      },
     );
   }
 
-  Widget _buildInfoCard(String customerName) {
+  Future<void> _handleCallCustomer(Customer customer) async {
+    // Use accent color based on loan type for consistent styling
+    final accentColor = widget.loan.isMonthlyInterest 
+        ? Colors.orange.shade600 
+        : AppColors.primary;
+    await PhoneCallHelper.handleCall(context, customer, accentColor: accentColor);
+  }
+
+  Widget _buildInfoCard(Customer customer) {
+    final customerName = customer.name;
     final principal = widget.loan.principal.toDouble();
     final paid = widget.loan.totalPaid.toDouble();
     final remaining = _getOutstanding();
@@ -198,13 +235,53 @@ class _PaymentCollectionScreenNewState extends State<PaymentCollectionScreenNew>
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        customerName,
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w600,
-                        ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              customerName,
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          if (customer.phoneNumber.trim().isNotEmpty ||
+                              (customer.alternatePhone?.trim().isNotEmpty ??
+                                  false))
+                            OutlinedButton.icon(
+                              onPressed: () => _handleCallCustomer(customer),
+                              icon: Icon(Icons.phone, size: 16, color: accentColor),
+                              label: Text(
+                                'Call',
+                                style: TextStyle(color: accentColor),
+                              ),
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4,
+                                ),
+                                minimumSize: Size.zero,
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                side: BorderSide(color: accentColor),
+                              ),
+                            ),
+                        ],
                       ),
+                      if (customer.phoneNumber.isNotEmpty)
+                        Row(
+                          children: [
+                            const Icon(Icons.phone, size: 13, color: AppColors.textSecondary),
+                            const SizedBox(width: 4),
+                            Text(
+                              customer.allPhoneNumbers,
+                              style: const TextStyle(
+                                color: AppColors.textSecondary,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ],
+                        ),
                       const SizedBox(height: 4),
                       Wrap(
                         spacing: 8,
@@ -1170,34 +1247,13 @@ class _PaymentCollectionScreenNewState extends State<PaymentCollectionScreenNew>
     
     try {
       // Calculate amount based on loan type
-      Decimal amount;
+      Decimal amount = Decimal.zero;
       String? notes;
       
       if (widget.loan.isMonthlyInterest) {
-        final interestAmount = double.tryParse(_interestCollectionController.text) ?? 0;
-        final principalAmount = double.tryParse(_principalRepaymentController.text) ?? 0;
-        
-        // Total amount is only the principal repayment (interest is tracked separately)
-        amount = Decimal.parse(principalAmount.toStringAsFixed(0));
-        
-        // Build notes to track interest collection
-        final notesParts = <String>[];
-        if (interestAmount > 0) {
-          notesParts.add('Interest: ₹${interestAmount.toStringAsFixed(0)}');
-        }
-        if (principalAmount > 0) {
-          notesParts.add('Principal: ₹${principalAmount.toStringAsFixed(0)}');
-        }
-        if (_notesController.text.trim().isNotEmpty) {
-          notesParts.add(_notesController.text.trim());
-        }
-        notes = notesParts.join(' | ');
-        
-        // We need to handle interest collection separately
-        // For now, we'll record the total as one payment but notes will track breakdown
-        // Total payment recorded in transaction = interest + principal
-        final totalCollection = interestAmount + principalAmount;
-        amount = Decimal.parse(totalCollection.toStringAsFixed(0));
+        notes = _notesController.text.trim().isEmpty
+            ? null
+            : _notesController.text.trim();
       } else {
         // Safe parse with fallback to zero
         final parsedAmount = double.tryParse(_amountController.text) ?? 0.0;
@@ -1344,7 +1400,7 @@ class _PaymentCollectionScreenNewState extends State<PaymentCollectionScreenNew>
             child: ElevatedButton(
               onPressed: () {
                 Navigator.pop(context); // Close dialog
-                Navigator.pop(context); // Go back to home
+                Navigator.pop(context, true); // Go back, signal data changed
               },
               child: const Text('Done'),
             ),

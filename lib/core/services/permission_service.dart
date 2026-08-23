@@ -1,4 +1,13 @@
 import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+/// Result of attempting to open the phone dialer / place a call.
+enum PhoneCallResult {
+  success,
+  noNumber,
+  permissionDenied,
+  launchFailed,
+}
 
 /// Service to handle app permissions
 class PermissionService {
@@ -20,6 +29,39 @@ class PermissionService {
   Future<bool> requestPhonePermission() async {
     final status = await Permission.phone.request();
     return status.isGranted;
+  }
+
+  /// Check if phone permission is permanently denied
+  Future<bool> isPhonePermissionPermanentlyDenied() async {
+    final status = await Permission.phone.status;
+    return status.isPermanentlyDenied;
+  }
+
+  /// Open dialer for [phone]. Requests CALL_PHONE when needed; still tries the
+  /// dialer if permission is denied (ACTION_DIAL does not require CALL_PHONE).
+  Future<PhoneCallResult> launchPhoneCall(String phone) async {
+    final cleanedPhone = phone.replaceAll(RegExp(r'[\s+\-]'), '');
+    if (cleanedPhone.isEmpty) {
+      return PhoneCallResult.noNumber;
+    }
+
+    final uri = Uri.parse('tel:$cleanedPhone');
+
+    var status = await Permission.phone.status;
+    if (!status.isGranted) {
+      status = await Permission.phone.request();
+    }
+
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+      return PhoneCallResult.success;
+    }
+
+    if (status.isDenied || status.isPermanentlyDenied) {
+      return PhoneCallResult.permissionDenied;
+    }
+
+    return PhoneCallResult.launchFailed;
   }
 
   /// Check if phone permission is granted

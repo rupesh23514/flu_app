@@ -6,7 +6,6 @@ class CustomerProvider extends ChangeNotifier {
   // Use repository for all customer operations (clean architecture)
   final CustomerRepository _customerRepository = CustomerRepository.instance;
 
-
   List<Customer> _customers = [];
   Customer? _selectedCustomer;
   bool _isLoading = false;
@@ -22,7 +21,7 @@ class CustomerProvider extends ChangeNotifier {
   String _searchQuery = '';
   List<Customer> get filteredCustomers {
     if (_searchQuery.isEmpty) return _customers;
-    
+
     return _customers.where((customer) {
       final name = customer.name.toLowerCase();
       final phone = customer.phoneNumber.toLowerCase();
@@ -75,7 +74,7 @@ class CustomerProvider extends ChangeNotifier {
     );
 
     final result = await _customerRepository.insert(customerWithDates);
-    
+
     return result.fold(
       onSuccess: (id) async {
         if (id > 0) {
@@ -113,7 +112,7 @@ class CustomerProvider extends ChangeNotifier {
     );
 
     final result = await _customerRepository.insert(customerWithDates);
-    
+
     return result.fold(
       onSuccess: (id) async {
         if (id > 0) {
@@ -145,17 +144,17 @@ class CustomerProvider extends ChangeNotifier {
     // Allow editing phone number without restriction - same number can exist for different loans
 
     final result = await _customerRepository.update(customer);
-    
+
     return result.fold(
       onSuccess: (updateCount) async {
         if (updateCount > 0) {
           await loadCustomers();
-          
+
           // Update selected customer if it was the one being edited
           if (_selectedCustomer?.id == customer.id) {
             _selectedCustomer = customer;
           }
-          
+
           _isLoading = false;
           notifyListeners();
           return true;
@@ -182,7 +181,7 @@ class CustomerProvider extends ChangeNotifier {
 
     // Use repository for cascade delete operation
     final result = await _customerRepository.deleteEntirely(customerId);
-    
+
     return result.fold(
       onSuccess: (_) async {
         await loadCustomers();
@@ -199,6 +198,39 @@ class CustomerProvider extends ChangeNotifier {
         _isLoading = false;
         notifyListeners();
         return false;
+      },
+    );
+  }
+
+  /// Bulk delete multiple customers and all their related data atomically
+  /// Uses a single SQL transaction instead of N+1 individual deletes
+  /// Returns the number of successfully deleted customers
+  Future<int> bulkDeleteCustomers(List<int> customerIds) async {
+    if (customerIds.isEmpty) return 0;
+
+    _isLoading = true;
+    _errorMessage = null;
+    notifyListeners();
+
+    final result = await _customerRepository.bulkDeleteEntirely(customerIds);
+
+    return result.fold(
+      onSuccess: (deletedCount) async {
+        await loadCustomers();
+        // Clear selected customer if it was one of the deleted
+        if (_selectedCustomer?.id != null &&
+            customerIds.contains(_selectedCustomer!.id)) {
+          _selectedCustomer = null;
+        }
+        _isLoading = false;
+        notifyListeners();
+        return deletedCount;
+      },
+      onFailure: (message, _) {
+        _errorMessage = 'Error deleting customers: $message';
+        _isLoading = false;
+        notifyListeners();
+        return 0;
       },
     );
   }
@@ -244,27 +276,25 @@ class CustomerProvider extends ChangeNotifier {
   }
 
   bool isPhoneNumberUnique(String phoneNumber, {int? excludeCustomerId}) {
-    return !_customers.any((customer) => 
-      customer.phoneNumber == phoneNumber && 
-      customer.id != excludeCustomerId
-    );
+    return !_customers.any((customer) =>
+        customer.phoneNumber == phoneNumber &&
+        customer.id != excludeCustomerId);
   }
 
   Customer? findCustomerByPhone(String phoneNumber) {
-    final matches = _customers.where(
-      (customer) => customer.phoneNumber == phoneNumber
-    );
+    final matches =
+        _customers.where((customer) => customer.phoneNumber == phoneNumber);
     return matches.isNotEmpty ? matches.first : null;
   }
 
   List<Customer> searchCustomers(String query) {
     if (query.isEmpty) return _customers;
-    
+
     final lowercaseQuery = query.toLowerCase();
     return _customers.where((customer) {
       return customer.name.toLowerCase().contains(lowercaseQuery) ||
-             customer.phoneNumber.contains(query) ||
-             (customer.address?.toLowerCase().contains(lowercaseQuery) ?? false);
+          customer.phoneNumber.contains(query) ||
+          (customer.address?.toLowerCase().contains(lowercaseQuery) ?? false);
     }).toList();
   }
 

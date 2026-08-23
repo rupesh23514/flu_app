@@ -12,10 +12,13 @@ import 'core/services/reminder_service.dart';
 import 'core/services/permission_helper.dart';
 import 'core/services/bootstrap_service.dart';
 import 'core/services/oem_battery_helper.dart';
+import 'core/services/admin_telemetry_service.dart';
 import 'shared/themes/app_theme.dart';
 import 'shared/models/customer.dart';
 import 'features/authentication/providers/auth_provider.dart';
 import 'features/authentication/screens/app_lock_screen_new.dart';
+import 'features/authentication/screens/account_choice_screen.dart';
+import 'features/authentication/screens/account_suspended_screen.dart';
 import 'features/home/screens/home_screen.dart';
 import 'features/settings/screens/settings_screen.dart';
 import 'features/calendar/screens/calendar_screen.dart';
@@ -25,7 +28,7 @@ import 'features/reports/screens/reports_screen.dart';
 import 'features/calculator/screens/calculator_screen.dart';
 import 'features/customers/screens/customer_groups_screen.dart';
 import 'features/backup/screens/backup_screen.dart';
-import 'features/loan_management/screens/payment_collection_screen.dart';
+import 'features/loan_management/screens/payment_collection_screen.dart'; // legacy fallback
 import 'features/customer_management/screens/add_borrower_screen.dart';
 
 class FinancialApp extends StatefulWidget {
@@ -39,18 +42,52 @@ class _FinancialAppState extends State<FinancialApp> with WidgetsBindingObserver
   StreamSubscription<AlarmData>? _alarmSubscription;
   AppLifecycleState _currentLifecycleState = AppLifecycleState.resumed;
   bool _permissionsRequested = false;
+  
+  // Suspension status tracking
+  bool _isSuspended = false;
+  String? _suspendedReason;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _listenForAlarms();
+    // Check suspension status from local cache immediately
+    _loadCachedSuspensionStatus();
     // Request permissions and perform deferred update check after first frame
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _requestPermissionsIfNeeded();
       // Deferred update check - doesn't block startup
       BootstrapService.instance.performDeferredUpdateCheck();
+      // Check suspension status with server (async, non-blocking)
+      _checkSuspensionStatus();
     });
+  }
+  
+  /// Load cached suspension status synchronously for immediate UI decision
+  void _loadCachedSuspensionStatus() {
+    final telemetry = AdminTelemetryService.instance;
+    final status = telemetry.getCachedSuspensionStatus();
+    if (status.isSuspended) {
+      setState(() {
+        _isSuspended = true;
+        _suspendedReason = status.reason;
+      });
+    }
+  }
+  
+  /// Check suspension status with server and update UI
+  Future<void> _checkSuspensionStatus() async {
+    final telemetry = AdminTelemetryService.instance;
+    if (!telemetry.isEnabled) return;
+    
+    final status = await telemetry.checkAccountStatus();
+    if (mounted && status.isSuspended != _isSuspended) {
+      setState(() {
+        _isSuspended = status.isSuspended;
+        _suspendedReason = status.reason;
+      });
+    }
   }
 
   /// 🏆 LEGENDARY Permission Request - handles all permissions professionally
@@ -222,6 +259,9 @@ class _FinancialAppState extends State<FinancialApp> with WidgetsBindingObserver
       
       // Verify and reschedule any missing alarms when app resumes
       _verifyAlarmsOnResume();
+      
+      // Check suspension status on resume (async, non-blocking)
+      _checkSuspensionStatus();
     }
   }
   
@@ -274,6 +314,10 @@ class _FinancialAppState extends State<FinancialApp> with WidgetsBindingObserver
             
             home: Consumer<AuthProvider>(
               builder: (context, authProvider, child) {
+                // Priority order: suspended > authenticated > lock screen
+                if (_isSuspended) {
+                  return AccountSuspendedScreen(reason: _suspendedReason);
+                }
                 if (authProvider.isAuthenticated) {
                   return const HomeScreen();
                 } else {
@@ -289,8 +333,18 @@ class _FinancialAppState extends State<FinancialApp> with WidgetsBindingObserver
               '/calculator': (context) => const CalculatorScreen(),
               '/customer-groups': (context) => const CustomerGroupsScreen(),
               '/backup': (context) => const BackupScreen(),
+              '/account-choice': (context) => const AccountChoiceScreen(),
+              '/dashboard': (context) => const HomeScreen(),
             },
             onGenerateRoute: (settings) {
+              // Block all navigation when account is suspended
+              if (_isSuspended) {
+                return MaterialPageRoute(
+                  builder: (context) => AccountSuspendedScreen(reason: _suspendedReason),
+                  settings: settings,
+                );
+              }
+              
               // Handle routes with arguments
               if (settings.name == '/add-borrower' || settings.name == AppRoutes.addBorrower) {
                 final customer = settings.arguments as Customer?;

@@ -9,6 +9,7 @@ import 'core/providers/language_provider.dart';
 import 'features/authentication/providers/auth_provider.dart';
 import 'features/loan_management/providers/loan_provider.dart';
 import 'features/customer_management/providers/customer_provider.dart';
+import 'core/services/admin_telemetry_service.dart';
 
 // Global key for showing dialogs from main
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
@@ -27,7 +28,10 @@ void main() async {
         debugPrint('Flutter Error: ${details.exceptionAsString()}');
         debugPrint('Stack trace: ${details.stack}');
       }
-      // Don't rethrow - gracefully handle the error
+      AdminTelemetryService.instance.trackError(
+        details.exceptionAsString(),
+        stackTrace: details.stack,
+      );
     };
     
     // Initialize all services via BootstrapService
@@ -57,11 +61,13 @@ void main() async {
       ),
     );
   }, (error, stackTrace) {
-    // Global async error handler - only log in debug mode
     if (kDebugMode) {
       debugPrint('Uncaught async error: $error');
       debugPrint('Stack trace: $stackTrace');
     }
-    // Log but don't crash the app
+    AdminTelemetryService.instance.trackError(
+      error.toString(),
+      stackTrace: stackTrace,
+    );
   });
 }

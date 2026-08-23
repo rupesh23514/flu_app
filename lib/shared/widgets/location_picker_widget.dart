@@ -594,7 +594,7 @@ class _LocationPickerWidgetState extends State<LocationPickerWidget> {
           // OpenStreetMap Tiles with robust error handling
           TileLayer(
             urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-            userAgentPackageName: 'com.moneylender.flu_app',
+            userAgentPackageName: 'com.example.flu_app',
             // Tile performance optimizations
             maxZoom: 18,
             keepBuffer: 2, // Keep fewer tiles in memory

@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Money Lender Admin</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <section id="loginScreen" class="login-screen">
+    <div class="login-card">
+      <h1>Money Lender Admin</h1>
+      <p>Monitor users, sign-ins, backups, and app analytics</p>
+      <form id="loginForm">
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="username" required />
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+        <button class="btn-primary" type="submit">Sign In</button>
+      </form>
+      <div id="loginError" class="error-text"></div>
+    </div>
+  </section>
+
+  <div id="dashboard" class="dashboard hidden">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">ML</div>
+        <div>
+          <h2>Admin Console</h2>
+          <span>Money Lender App</span>
+        </div>
+      </div>
+      <button class="nav-btn active" data-view="overview">Overview</button>
+      <button class="nav-btn" data-view="users">Lenders</button>
+      <button class="nav-btn" data-view="events">Activity Log</button>
+      <button class="nav-btn" data-view="errors">Error Reports</button>
+      <button class="nav-btn" data-view="billing" id="billingNavBtn">Billing</button>
+      <button class="nav-btn" data-view="audit" id="auditNavBtn">Audit Logs</button>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <h1 id="pageTitle">Overview</h1>
+        <div class="topbar-actions">
+          <span id="lastUpdatedLabel" style="font-size:12px;color:#8fa0bf;margin-right:8px"></span>
+          <span id="adminName" class="email-chip"></span>
+          <button id="refreshBtn" class="btn-secondary" title="Refresh data">Refresh</button>
+          <button id="logoutBtn" class="btn-secondary">Logout</button>
+        </div>
+      </div>
+
+      <section id="overviewView">
+        <div class="stats-grid" id="statsGrid"></div>
+        
+        <div class="charts-row">
+          <div class="panel chart-panel">
+            <div class="panel-header">
+              <h3>Sign-ins (Last 14 Days)</h3>
+            </div>
+            <div class="chart-wrap">
+              <div id="signInChart" class="bar-chart"></div>
+            </div>
+          </div>
+          <div class="panel chart-panel">
+            <div class="panel-header">
+              <h3>App Version Distribution</h3>
+            </div>
+            <div class="chart-wrap">
+              <div id="versionChart" class="pie-chart-container"></div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="panel">
+          <div class="panel-header">
+            <h3>Recent Activity</h3>
+          </div>
+          <div id="recentActivityTable"></div>
+        </div>
+      </section>
+
+      <section id="usersView" class="hidden">
+        <div class="panel">
+          <div class="panel-header">
+            <h3>All Lenders</h3>
+            <div class="filter-row">
+              <input id="userSearch" class="search-box" placeholder="Search email, name, device id..." />
+              <select id="userFilter" class="filter-select">
+                <option value="">All lenders</option>
+                <option value="signed_in">Signed in</option>
+                <option value="not_signed_in">Not signed in</option>
+                <option value="has_overdue">Has overdue loans</option>
+                <option value="backup_failing">Backup failing</option>
+                <option value="inactive_7d">Inactive 7+ days</option>
+                <option value="has_errors">Has errors</option>
+              </select>
+              <select id="userSort" class="filter-select">
+                <option value="last_seen">Sort: Last seen</option>
+                <option value="outstanding">Sort: Outstanding (high)</option>
+                <option value="loan_count">Sort: Loan count</option>
+                <option value="customer_count">Sort: Customers</option>
+                <option value="first_seen">Sort: First seen</option>
+              </select>
+              <button id="exportUsersBtn" class="btn-secondary btn-small">Export CSV</button>
+            </div>
+          </div>
+          <div id="usersTable"></div>
+        </div>
+      </section>
+
+      <section id="eventsView" class="hidden">
+        <div class="panel">
+          <div class="panel-header">
+            <h3>Activity Log</h3>
+            <select id="eventTypeFilter">
+              <option value="">All events</option>
+              <option value="sign_in">Sign in</option>
+              <option value="sign_out">Sign out</option>
+              <option value="backup_success">Backup success</option>
+              <option value="backup_failed">Backup failed</option>
+              <option value="app_open">App open</option>
+              <option value="stats_sync">Stats sync</option>
+              <option value="error">Error</option>
+            </select>
+          </div>
+          <div id="eventsTable"></div>
+        </div>
+      </section>
+
+      <section id="errorsView" class="hidden">
+        <div class="panel">
+          <div class="panel-header">
+            <h3>Error Reports</h3>
+          </div>
+          <div id="errorsTable"></div>
+        </div>
+      </section>
+
+      <section id="billingView" class="hidden">
+        <div class="stats-grid" id="billingStatsGrid"></div>
+        
+        <div class="panel">
+          <div class="panel-header">
+            <h3>Available Plans</h3>
+          </div>
+          <div id="plansGrid" class="plans-grid"></div>
+        </div>
+        
+        <div class="panel">
+          <div class="panel-header">
+            <h3>Subscriptions</h3>
+            <select id="subscriptionStatusFilter" class="filter-select">
+              <option value="">All statuses</option>
+              <option value="active">Active</option>
+              <option value="expired">Expired</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+          </div>
+          <div id="subscriptionsTable"></div>
+        </div>
+      </section>
+
+      <section id="auditView" class="hidden">
+        <div class="panel">
+          <div class="panel-header">
+            <h3>Audit Logs</h3>
+            <div class="filter-row">
+              <select id="auditActionFilter" class="filter-select">
+                <option value="">All actions</option>
+                <option value="login_success">Login success</option>
+                <option value="login_failed">Login failed</option>
+                <option value="suspend_user">Suspend user</option>
+                <option value="unsuspend_user">Unsuspend user</option>
+                <option value="update_notes">Update notes</option>
+                <option value="assign_plan">Assign plan</option>
+              </select>
+              <button id="exportAuditBtn" class="btn-secondary btn-small">Export CSV</button>
+            </div>
+          </div>
+          <div id="auditTable"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="userModal" class="modal-backdrop hidden">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <h3 id="modalTitle">Lender Details</h3>
+          <span id="modalSubtitle" class="modal-subtitle"></span>
+        </div>
+        <div class="modal-header-actions">
+          <span id="suspendedBadge" class="badge error hidden">SUSPENDED</span>
+          <button id="closeModalBtn" class="btn-secondary">Close</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <!-- Profile & Status -->
+        <div class="detail-section">
+          <h4>Profile</h4>
+          <div id="userProfileGrid" class="detail-grid"></div>
+        </div>
+        
+        <!-- Portfolio Summary -->
+        <div class="detail-section">
+          <h4>Portfolio</h4>
+          <div class="portfolio-cards" id="portfolioCards"></div>
+        </div>
+        
+        <!-- Loan Breakdown -->
+        <div class="detail-section">
+          <h4>Loan Breakdown</h4>
+          <div class="loan-breakdown-row">
+            <div id="loanTypeChart" class="donut-chart-container"></div>
+            <div id="loanStatsGrid" class="detail-grid compact"></div>
+          </div>
+        </div>
+        
+        <!-- Activity & Backup -->
+        <div class="detail-section">
+          <h4>Activity</h4>
+          <div id="activityGrid" class="detail-grid"></div>
+        </div>
+        
+        <!-- Admin Actions -->
+        <div class="detail-section" id="adminActionsSection">
+          <h4>Admin Actions</h4>
+          <div class="admin-actions-row">
+            <div class="action-card">
+              <label>Status</label>
+              <div id="suspendActions">
+                <button id="suspendBtn" class="btn-secondary btn-warning">Remove Access</button>
+                <button id="unsuspendBtn" class="btn-secondary btn-success hidden">Restore Access</button>
+              </div>
+              <p id="noEmailWarning" class="warning-text hidden">User must sign in with Google before access can be removed.</p>
+            </div>
+            <div class="action-card flex-grow">
+              <label>Internal Notes (not visible to lender)</label>
+              <textarea id="adminNotesInput" rows="3" placeholder="Add internal notes about this lender..."></textarea>
+              <button id="saveNotesBtn" class="btn-secondary btn-small" style="margin-top:8px">Save Notes</button>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Recent Events -->
+        <div class="panel" style="margin-top: 16px;">
+          <div class="panel-header"><h3>Recent Events</h3></div>
+          <div id="userEventsTable"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Suspend Confirmation Modal -->
+  <div id="suspendModal" class="modal-backdrop hidden">
+    <div class="modal modal-small">
+      <div class="modal-header">
+        <h3>Remove Access</h3>
+        <button id="closeSuspendModalBtn" class="btn-secondary">Cancel</button>
+      </div>
+      <div class="modal-body">
+        <div class="suspend-warning">
+          <div class="warning-icon">⚠️</div>
+          <p><strong>This will block ALL devices</strong> signed in with this email.</p>
+          <p id="suspendEmailDisplay" class="email-display"></p>
+        </div>
+        <div class="form-group">
+          <label for="suspendReasonInput">Reason for removal <span class="required">*</span></label>
+          <textarea id="suspendReasonInput" rows="3" placeholder="e.g., Payment overdue, Policy violation, Account misuse..." required></textarea>
+          <small class="helper-text">This reason will be shown to the user when they try to use the app.</small>
+        </div>
+        <div class="modal-actions">
+          <button id="cancelSuspendBtn" class="btn-secondary">Cancel</button>
+          <button id="confirmSuspendBtn" class="btn-primary btn-danger">Remove Access</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

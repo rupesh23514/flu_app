@@ -1145,7 +1145,7 @@ class AlarmService {
       // Try to open the exact alarm permission settings directly
       const intent = AndroidIntent(
         action: 'android.settings.REQUEST_SCHEDULE_EXACT_ALARM',
-        package: 'com.example.flu_app', // Replace with your package name
+        package: 'com.example.flu_app',
         flags: <int>[Flag.FLAG_ACTIVITY_NEW_TASK],
       );
       await intent.launch();

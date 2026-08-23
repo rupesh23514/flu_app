@@ -547,6 +547,16 @@ class LoanProvider extends ChangeNotifier {
       debugPrint(
           'DEBUG: Starting payment addition for loan $loanId, amount: $amount');
 
+      // Guard: monthly interest loans must use addMonthlyInterestPayment so
+      // total_interest_collected is tracked correctly.
+      final loanCheck = await getLoanById(loanId);
+      if (loanCheck != null && loanCheck.isMonthlyInterest) {
+        _errorMessage =
+            'Use the payment collection screen for monthly interest loans';
+        notifyListeners();
+        return false;
+      }
+
       // Validate amount first
       if (amount <= Decimal.zero) {
         _errorMessage = 'Payment amount must be greater than zero';
@@ -748,6 +758,11 @@ class LoanProvider extends ChangeNotifier {
 
       final resolvedCustomerId = loan.customerId;
       final totalPayment = interestAmount + principalAmount;
+      final paymentNotes = _buildMonthlyInterestPaymentNotes(
+        interestAmount,
+        principalAmount,
+        userNotes: notes,
+      );
 
       // Create payment record
       final payment = Payment(
@@ -756,7 +771,7 @@ class LoanProvider extends ChangeNotifier {
         amount: totalPayment,
         paymentDate: paymentDate,
         paymentMethod: paymentMethod,
-        notes: notes,
+        notes: paymentNotes,
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
       );
@@ -774,7 +789,7 @@ class LoanProvider extends ChangeNotifier {
                 customerId: resolvedCustomerId,
                 amount: totalPayment,
                 loanId: loanId,
-                description: notes ?? 'Monthly payment (Interest + Principal)',
+                description: paymentNotes,
                 transactionDate: paymentDate,
               );
               debugPrint(
@@ -907,21 +922,71 @@ class LoanProvider extends ChangeNotifier {
       return await updateResult.fold(
         onSuccess: (count) async {
           if (count > 0) {
-            // Calculate the difference in payment amount
-            final amountDifference = payment.amount - oldPayment.amount;
-
             // Update the loan totals
             final loan = await getLoanById(payment.loanId);
             if (loan != null) {
-              final newTotalPaid = loan.totalPaid + amountDifference;
+              Decimal principalDifference;
+              Decimal interestDifference = Decimal.zero;
+
+              if (loan.isMonthlyInterest) {
+                // For monthly interest loans, split the delta by interest/principal
+                // using structured notes from old and new payment.
+                final oldBreakdown = oldPayment.notes != null
+                    ? _parsePaymentNotesForInterestPrincipal(oldPayment.notes!)
+                    : <String, Decimal>{};
+                final newBreakdown = payment.notes != null
+                    ? _parsePaymentNotesForInterestPrincipal(payment.notes!)
+                    : <String, Decimal>{};
+
+                final oldInterest = oldBreakdown['interest'] ?? Decimal.zero;
+                final oldPrincipal = oldBreakdown['principal'] ?? Decimal.zero;
+                final newInterest = newBreakdown['interest'] ?? Decimal.zero;
+                final newPrincipal = newBreakdown['principal'] ?? Decimal.zero;
+
+                // If notes are missing on the edited payment, fall back to
+                // treating the full difference as a principal change (safe default).
+                final hasNewBreakdown = newInterest != Decimal.zero || newPrincipal != Decimal.zero;
+                if (hasNewBreakdown) {
+                  interestDifference = newInterest - oldInterest;
+                  principalDifference = newPrincipal - oldPrincipal;
+                } else {
+                  // No usable breakdown after edit — treat entire amount as principal
+                  principalDifference = payment.amount - oldPayment.amount;
+                }
+              } else {
+                // Weekly loan: entire difference is principal
+                principalDifference = payment.amount - oldPayment.amount;
+              }
+
+              final newTotalPaid = loan.totalPaid + principalDifference;
               final newRemainingAmount = loan.principal - newTotalPaid;
+
+              // Adjust total interest collected for monthly loans
+              Decimal newTotalInterestCollected =
+                  loan.totalInterestCollected ?? Decimal.zero;
+              if (loan.isMonthlyInterest) {
+                newTotalInterestCollected =
+                    newTotalInterestCollected + interestDifference;
+                if (newTotalInterestCollected < Decimal.zero) {
+                  newTotalInterestCollected = Decimal.zero;
+                }
+              }
 
               // Determine new status
               LoanStatus newStatus = loan.status;
               if (newTotalPaid >= loan.principal) {
                 newStatus = LoanStatus.completed;
+              } else if (loan.isMonthlyInterest) {
+                final daysSinceLoan =
+                    DateTime.now().difference(loan.loanDate).inDays;
+                final monthsElapsed = daysSinceLoan ~/ 30;
+                if (monthsElapsed > loan.tenure &&
+                    newRemainingAmount > Decimal.zero) {
+                  newStatus = LoanStatus.overdue;
+                } else {
+                  newStatus = LoanStatus.active;
+                }
               } else if (newTotalPaid < Decimal.zero) {
-                // Edge case: if somehow overpaid before
                 newStatus = LoanStatus.active;
               } else {
                 final emiAmount = loan.principal.toDouble() / 10;
@@ -945,33 +1010,35 @@ class LoanProvider extends ChangeNotifier {
                 remainingAmount: newRemainingAmount > Decimal.zero
                     ? newRemainingAmount
                     : Decimal.zero,
+                totalInterestCollected: loan.isMonthlyInterest
+                    ? newTotalInterestCollected
+                    : null,
                 status: newStatus,
                 updatedAt: DateTime.now(),
               );
 
               await _loanRepository.update(updatedLoan);
 
-              // Record transaction adjustment for the payment change
-              if (amountDifference != Decimal.zero) {
+              // Record transaction adjustment — use total amount delta for ledger
+              final totalAmountDifference = payment.amount - oldPayment.amount;
+              if (totalAmountDifference != Decimal.zero) {
                 try {
-                  if (amountDifference > Decimal.zero) {
-                    // Payment was increased
+                  if (totalAmountDifference > Decimal.zero) {
                     await _transactionService.recordCredit(
                       customerId: payment.customerId,
-                      amount: amountDifference,
+                      amount: totalAmountDifference,
                       loanId: payment.loanId,
                       description:
-                          'Payment adjustment (+${amountDifference.toString()})',
+                          'Payment adjustment (+${totalAmountDifference.toString()})',
                       transactionDate: DateTime.now(),
                     );
                   } else {
-                    // Payment was decreased
                     await _transactionService.recordDebit(
                       customerId: payment.customerId,
-                      amount: amountDifference.abs(),
+                      amount: totalAmountDifference.abs(),
                       loanId: payment.loanId,
                       description:
-                          'Payment adjustment (-${amountDifference.abs().toString()})',
+                          'Payment adjustment (-${totalAmountDifference.abs().toString()})',
                       transactionDate: DateTime.now(),
                     );
                   }
@@ -1009,7 +1076,85 @@ class LoanProvider extends ChangeNotifier {
     }
   }
 
+  /// Parse payment notes to extract interest and principal amounts
+  /// Build structured notes for monthly interest payments.
+  /// Format: "Interest: ₹X | Principal: ₹Y | optional user note"
+  String _buildMonthlyInterestPaymentNotes(
+    Decimal interestAmount,
+    Decimal principalAmount, {
+    String? userNotes,
+  }) {
+    final parts = <String>[
+      'Interest: ₹${interestAmount.toStringAsFixed(0)}',
+      'Principal: ₹${principalAmount.toStringAsFixed(0)}',
+    ];
+
+    final freeText = _extractFreeTextFromMonthlyPaymentNotes(userNotes);
+    if (freeText != null && freeText.isNotEmpty) {
+      parts.add(freeText);
+    }
+
+    return parts.join(' | ');
+  }
+
+  /// Returns raw user note text, stripping an embedded Interest/Principal breakdown.
+  String? _extractFreeTextFromMonthlyPaymentNotes(String? userNotes) {
+    final trimmedNotes = userNotes?.trim();
+    if (trimmedNotes == null || trimmedNotes.isEmpty) {
+      return null;
+    }
+
+    final hasStructuredBreakdown = trimmedNotes.contains('Interest:') &&
+        trimmedNotes.contains('Principal:');
+    if (!hasStructuredBreakdown) {
+      return trimmedNotes;
+    }
+
+    final structuredPrefix = RegExp(
+      r'^Interest:\s*₹?\d+(?:\.\d+)?\s*\|\s*Principal:\s*₹?\d+(?:\.\d+)?',
+      caseSensitive: false,
+    ).firstMatch(trimmedNotes);
+    if (structuredPrefix == null) {
+      return null;
+    }
+
+    var remainder = trimmedNotes.substring(structuredPrefix.end).trim();
+    if (remainder.startsWith('|')) {
+      remainder = remainder.substring(1).trim();
+    }
+    return remainder.isEmpty ? null : remainder;
+  }
+
+  /// Notes format: "Interest: ₹500 | Principal: ₹1000"
+  Map<String, Decimal> _parsePaymentNotesForInterestPrincipal(String notes) {
+    Decimal interest = Decimal.zero;
+    Decimal principal = Decimal.zero;
+
+    try {
+      // Extract Interest amount using regex
+      final interestMatch =
+          RegExp(r'Interest:\s*₹?(\d+(?:\.\d+)?)', caseSensitive: false)
+              .firstMatch(notes);
+      if (interestMatch != null) {
+        interest = Decimal.parse(interestMatch.group(1)!);
+      }
+
+      // Extract Principal amount using regex
+      final principalMatch =
+          RegExp(r'Principal:\s*₹?(\d+(?:\.\d+)?)', caseSensitive: false)
+              .firstMatch(notes);
+      if (principalMatch != null) {
+        principal = Decimal.parse(principalMatch.group(1)!);
+      }
+    } catch (e) {
+      debugPrint('DEBUG: Error parsing payment notes: $e');
+    }
+
+    return {'interest': interest, 'principal': principal};
+  }
+
   /// Delete a payment and recalculate loan totals
+  /// For monthly interest loans, parses notes to extract interest vs principal amounts
   Future<bool> deletePayment(int paymentId,
       {bool permanentDelete = false}) async {
     try {
@@ -1035,14 +1180,61 @@ class LoanProvider extends ChangeNotifier {
             // Update the loan totals - subtract the deleted payment amount
             final loan = await getLoanById(payment.loanId);
             if (loan != null) {
-              final newTotalPaid = loan.totalPaid - payment.amount;
+              Decimal principalToSubtract = Decimal.zero;
+              Decimal interestToSubtract = Decimal.zero;
+
+              // For monthly interest loans, parse notes to get interest/principal breakdown
+              if (loan.isMonthlyInterest) {
+                if (payment.notes != null) {
+                  final breakdown =
+                      _parsePaymentNotesForInterestPrincipal(payment.notes!);
+                  interestToSubtract = breakdown['interest'] ?? Decimal.zero;
+                  principalToSubtract = breakdown['principal'] ?? Decimal.zero;
+                }
+                // If notes are null or parsing yields zeros, infer from loan state:
+                // treat the full payment as interest-only (safest default — avoids
+                // over-reducing totalPaid when principal repayment is uncommon).
+                if (interestToSubtract == Decimal.zero && principalToSubtract == Decimal.zero) {
+                  interestToSubtract = payment.amount;
+                }
+                debugPrint(
+                    'DEBUG: Monthly loan delete - Interest: $interestToSubtract, Principal: $principalToSubtract');
+              } else {
+                // Weekly loans: entire payment is principal
+                principalToSubtract = payment.amount;
+              }
+
+              final newTotalPaid = loan.totalPaid - principalToSubtract;
               final newRemainingAmount = loan.principal - newTotalPaid;
 
-              // Determine new status
+              // Update total interest collected for monthly loans
+              Decimal newTotalInterestCollected =
+                  loan.totalInterestCollected ?? Decimal.zero;
+              if (loan.isMonthlyInterest) {
+                newTotalInterestCollected =
+                    newTotalInterestCollected - interestToSubtract;
+                if (newTotalInterestCollected < Decimal.zero) {
+                  newTotalInterestCollected = Decimal.zero;
+                }
+              }
+
+              // Determine new status based on loan type
               LoanStatus newStatus = loan.status;
               if (newTotalPaid >= loan.principal) {
                 newStatus = LoanStatus.completed;
+              } else if (loan.isMonthlyInterest) {
+                // Monthly loan: check 30-day overdue
+                final daysSinceLoan =
+                    DateTime.now().difference(loan.loanDate).inDays;
+                final monthsElapsed = daysSinceLoan ~/ 30;
+                if (monthsElapsed > loan.tenure &&
+                    newRemainingAmount > Decimal.zero) {
+                  newStatus = LoanStatus.overdue;
+                } else {
+                  newStatus = LoanStatus.active;
+                }
               } else {
+                // Weekly loan: check EMI-based overdue
                 final emiAmount = loan.principal.toDouble() / 10;
                 final actualPayments =
                     (newTotalPaid.toDouble() / emiAmount).floor();
@@ -1076,6 +1268,8 @@ class LoanProvider extends ChangeNotifier {
                 remainingAmount: newRemainingAmount > Decimal.zero
                     ? newRemainingAmount
                     : loan.principal,
+                totalInterestCollected:
+                    loan.isMonthlyInterest ? newTotalInterestCollected : null,
                 status: newStatus,
                 lastPaymentDate: newLastPaymentDate,
                 updatedAt: DateTime.now(),

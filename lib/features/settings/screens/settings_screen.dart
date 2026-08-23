@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+
 import '../../../core/constants/app_colors.dart';
 import '../../../core/services/database_service.dart';
 import '../../../core/services/google_drive_service.dart';
@@ -12,7 +12,8 @@ import '../../../core/services/excel_export_service.dart';
 import '../../../core/services/app_update_service.dart';
 import '../../../core/services/migration_safety_service.dart';
 import '../../../core/services/backup_service.dart';
-import '../../../core/services/backup_encryption_service.dart';
+import '../../../core/services/post_restore_service.dart';
+import '../../../core/services/restore_helper_service.dart';
 import '../../../core/providers/language_provider.dart';
 import '../../../core/localization/app_localizations.dart';
 import '../../authentication/providers/auth_provider.dart';
@@ -57,15 +58,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _checkConnectivity() async {
-    // connectivity_plus checkConnectivity() returns ConnectivityResult
-    final ConnectivityResult result = await Connectivity().checkConnectivity();
-    if (mounted) {
-      setState(() {
-        _hasInternet = result != ConnectivityResult.none;
-      });
+    // connectivity_plus 5.0.2 returns ConnectivityResult (single value)
+    try {
+      final ConnectivityResult result = await Connectivity().checkConnectivity();
+      if (mounted) {
+        setState(() {
+          _hasInternet = result != ConnectivityResult.none;
+        });
+      }
+    } catch (e) {
+      debugPrint('Connectivity check error: $e');
+      // Default to true so Backup button is never permanently disabled
+      if (mounted) {
+        setState(() => _hasInternet = true);
+      }
     }
 
-    // Listen for connectivity changes - returns stream of ConnectivityResult
+    // Listen for connectivity changes
     _connectivitySubscription =
         Connectivity().onConnectivityChanged.listen((ConnectivityResult result) {
       if (mounted) {
@@ -79,15 +88,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _loadBackupState() async {
     await _driveService.initialize();
 
-    // Load auto backup preference from SharedPreferences
-    final prefs = await SharedPreferences.getInstance();
-    final savedAutoBackup = prefs.getBool('autoBackupEnabled') ?? false;
+    // Use BackupService as single source of truth for auto-backup preference
+    final backupAutoEnabled = await BackupService.instance.isAutoBackupEnabled();
 
     if (mounted) {
       setState(() {
         _isGoogleSignedIn = _driveService.isSignedIn;
         _lastBackupDate = _driveService.lastBackupDate;
-        _autoBackupEnabled = savedAutoBackup;
+        _autoBackupEnabled = backupAutoEnabled;
       });
 
       if (_isGoogleSignedIn) {
@@ -196,33 +204,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     setState(() => _isBackingUp = true);
 
+    String? tempCopyPath;
+
     try {
-      // Initialize encryption service
-      final encryptionService = BackupEncryptionService.instance;
-      await encryptionService.initialize();
-      
       // Create a safe database copy before uploading to avoid corrupting active database
-      final dbPath = await DatabaseService.instance.getDatabasePath();
-      final tempCopyPath = await DatabaseService.instance.createSafeCopy();
-      final safeCopyPath = tempCopyPath ?? dbPath;
-      
-      // Encrypt the backup before uploading to protect sensitive financial data
-      final encryptedPath = await encryptionService.encryptFile(safeCopyPath);
-      final pathToUpload = encryptedPath ?? safeCopyPath; // Fallback to unencrypted if encryption fails
-      
-      final success = await _driveService.uploadDatabase(pathToUpload);
-      
-      // Clean up temp files
-      if (tempCopyPath != null) {
-        try {
-          await File(tempCopyPath).delete();
-        } catch (_) {}
-      }
-      if (encryptedPath != null) {
-        try {
-          await File(encryptedPath).delete();
-        } catch (_) {}
-      }
+      tempCopyPath = await DatabaseService.instance.createSafeCopy();
+
+      // Upload the raw .db file — Google Drive provides transport + at-rest encryption
+      final success = await _driveService.uploadDatabase(tempCopyPath);
 
       if (mounted) {
         if (success) {
@@ -251,13 +240,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
       debugPrint('Backup error: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Backup failed. Please try again later.'),
+          SnackBar(
+            content: Text('Backup failed: ${e.toString().split(':').last.trim()}'),
             backgroundColor: AppColors.error,
+            duration: const Duration(seconds: 5),
           ),
         );
       }
     } finally {
+      try {
+        if (tempCopyPath != null) await File(tempCopyPath).delete();
+      } catch (_) {}
       if (mounted) {
         setState(() => _isBackingUp = false);
       }
@@ -280,18 +273,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
 
-    // Check if backup exists
+    // Check if backup exists and get its info
     final hasBackup = await _driveService.checkForBackup();
     if (!hasBackup) {
       if (mounted) {
+        // Show specific error if available, otherwise generic no-backup message
+        final errorMsg = _driveService.errorMessage;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No backup found in Google Drive'),
-            backgroundColor: AppColors.warning,
+          SnackBar(
+            content: Text(errorMsg ?? 'No backup found in Google Drive'),
+            backgroundColor: errorMsg != null ? AppColors.error : AppColors.warning,
           ),
         );
       }
       return;
+    }
+
+    // Get backup info (timestamp, size) to show user
+    final backupInfo = await _driveService.getBackupInfo();
+    String backupDateStr = 'Unknown';
+    if (backupInfo != null && backupInfo['modifiedTime'] != null) {
+      final modifiedTime = backupInfo['modifiedTime'] as DateTime;
+      backupDateStr = '${modifiedTime.day}/${modifiedTime.month}/${modifiedTime.year} '
+          '${modifiedTime.hour.toString().padLeft(2, '0')}:${modifiedTime.minute.toString().padLeft(2, '0')}';
     }
 
     // Check if there's existing data
@@ -299,10 +303,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final loanCount = await DatabaseService.instance.getLoanCount();
 
     String dialogContent =
-        'This will replace all current data with the backup from Google Drive. This action cannot be undone.\n\nAre you sure you want to continue?';
+        'Backup from: $backupDateStr\n\n'
+        'This will replace all current data with the backup from Google Drive. '
+        'This action cannot be undone.\n\nAre you sure you want to continue?';
 
     if (customerCount > 0 || loanCount > 0) {
-      dialogContent = 'WARNING: You currently have:\n'
+      dialogContent = 'Backup from: $backupDateStr\n\n'
+          'WARNING: You currently have:\n'
           '• $customerCount customers\n'
           '• $loanCount loans\n\n'
           'This restore will DELETE ALL existing data and replace it with the backup from Google Drive.\n\n'
@@ -345,91 +352,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _isRestoring = true);
 
     try {
-      // Download backup from Google Drive
-      final tempPath = await _driveService.downloadDatabase();
-
-      if (tempPath == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(_driveService.errorMessage ?? 'No backup found'),
-              backgroundColor: AppColors.error,
-            ),
-          );
-        }
-        return;
-      }
-
-      // Decrypt the backup if it's encrypted
-      final encryptionService = BackupEncryptionService.instance;
-      await encryptionService.initialize();
-      
-      String pathToRestore = tempPath;
-      final isEncrypted = await encryptionService.isFileEncrypted(tempPath);
-      
-      if (isEncrypted) {
-        final decryptedPath = await encryptionService.decryptFile(tempPath);
-        if (decryptedPath != null) {
-          pathToRestore = decryptedPath;
-        }
-      }
-
-      // Check backup database version compatibility before restoring
-      final backupVersion = await _driveService.getBackupDatabaseVersion(pathToRestore);
-      
-      if (backupVersion > 0 && !_driveService.isBackupCompatible(backupVersion)) {
-        // Clean up temp files
-        try {
-          await File(tempPath).delete();
-          if (pathToRestore != tempPath) {
-            await File(pathToRestore).delete();
-          }
-        } catch (_) {}
-        
-        if (mounted) {
-          setState(() => _isRestoring = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                'This backup is from an older app version (database v$backupVersion) and is not compatible. '
-                'Minimum required version is ${GoogleDriveService.minSupportedDbVersion}. '
-                'Please create a new backup with the latest app.',
-              ),
-              backgroundColor: AppColors.error,
-              duration: const Duration(seconds: 6),
-            ),
-          );
-        }
-        return;
-      }
-
-      // Restore database from downloaded/decrypted file
-      final success = await DatabaseService.instance.restoreFromFile(pathToRestore);
-      
-      // Clean up temp files
-      try {
-        await File(tempPath).delete();
-        if (pathToRestore != tempPath) {
-          await File(pathToRestore).delete();
-        }
-      } catch (_) {}
+      // Use centralized RestoreHelperService (handles download, decrypt, version check, restore)
+      final restoreHelper = RestoreHelperService.instance;
+      final result = await restoreHelper.restoreFromGoogleDrive(
+        signInIfNeeded: false, // Already signed in
+      );
 
       if (mounted) {
-        if (success) {
+        if (result.success) {
+          await _refreshProviders();
+          if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text(
-                  'Data restored successfully! Please restart the app to see changes.'),
+              content: Text('Data restored successfully!'),
               backgroundColor: AppColors.success,
               duration: Duration(seconds: 5),
             ),
           );
         } else {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content:
-                  Text('Failed to restore data. Database may be corrupted.'),
+            SnackBar(
+              content: Text(result.errorMessage ?? 'Restore failed'),
               backgroundColor: AppColors.error,
+              duration: Duration(seconds: result.versionIncompatible ? 8 : 4),
             ),
           );
         }
@@ -449,6 +394,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
         setState(() => _isRestoring = false);
       }
     }
+  }
+
+  /// Refresh providers, reschedule alarms, and validate migration after restore.
+  Future<void> _refreshProviders() async {
+    if (!mounted) return;
+    await PostRestoreService.instance.refreshAfterRestore(context);
   }
 
   Future<void> _exportToExcel() async {
@@ -826,9 +777,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onChanged: _isGoogleSignedIn
                   ? (value) async {
                       setState(() => _autoBackupEnabled = value);
-                      // Save preference in shared preferences
-                      final prefs = await SharedPreferences.getInstance();
-                      await prefs.setBool('autoBackupEnabled', value);
+                      // Save to BackupService (single source of truth)
+                      await BackupService.instance.setAutoBackupEnabled(value);
                       if (mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(
@@ -1327,20 +1277,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
 
     try {
-      final success =
-          await AppUpdateService.instance.restoreFromSpecificBackup(backupPath);
+      final backupService = BackupService.instance;
+      await backupService.initialize();
+      final success = await backupService.restoreFromFile(backupPath);
 
       if (!mounted) return;
       Navigator.pop(context);
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(success
-              ? 'Backup restored! Restart app to see changes.'
-              : 'Failed to restore backup'),
-          backgroundColor: success ? AppColors.success : AppColors.error,
-        ),
-      );
+      if (success) {
+        await _refreshProviders();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Backup restored successfully!'),
+            backgroundColor: AppColors.success,
+            duration: Duration(seconds: 5),
+          ),
+        );
+      } else {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(backupService.errorMessage ?? 'Failed to restore backup'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+      }
     } catch (e) {
       debugPrint('Backup restore error: $e');
       if (!mounted) return;

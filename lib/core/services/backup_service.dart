@@ -1,17 +1,25 @@
-import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as path;
 import 'package:share_plus/share_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'database_service.dart';
 
-/// Service for backup and restore functionality
+/// Service for backup and restore functionality.
+///
+/// All backups use the raw SQLite .db format for consistency with Google Drive
+/// backups. This ensures any backup can be restored from any source (local,
+/// Drive, WhatsApp) using the same `DatabaseService.restoreFromFile()` method,
+/// which handles auto-migration from any database version (v1–v12).
 class BackupService extends ChangeNotifier {
   static final BackupService instance = BackupService._internal();
-  
+
   final DatabaseService _databaseService = DatabaseService.instance;
-  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
+  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  );
 
   bool _isBackingUp = false;
   bool _isRestoring = false;
@@ -48,7 +56,7 @@ class BackupService extends ChangeNotifier {
   /// Set auto backup enabled
   Future<void> setAutoBackupEnabled(bool enabled) async {
     await _secureStorage.write(
-      key: _autoBackupKey, 
+      key: _autoBackupKey,
       value: enabled.toString(),
     );
   }
@@ -62,12 +70,13 @@ class BackupService extends ChangeNotifier {
   /// Set backup interval
   Future<void> setBackupInterval(int hours) async {
     await _secureStorage.write(
-      key: _backupIntervalKey, 
+      key: _backupIntervalKey,
       value: hours.toString(),
     );
   }
 
-  /// Create a backup of all data
+  /// Create a backup of all data as a raw .db file.
+  /// Uses SQLite WAL checkpoint + file copy for data safety.
   Future<BackupResult> createBackup() async {
     _isBackingUp = true;
     _progress = 0.0;
@@ -75,52 +84,49 @@ class BackupService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // Step 1: Export data from database
-      _progress = 0.2;
+      // Step 1: Create a safe copy of the live database
+      _progress = 0.3;
       notifyListeners();
-      
-      final exportData = await _databaseService.exportData();
-      
-      // Step 2: Create backup metadata
-      _progress = 0.4;
-      notifyListeners();
-      
-      final backupData = {
-        'version': '1.0.0',
-        'timestamp': DateTime.now().toIso8601String(),
-        'data': exportData,
-        'checksum': _generateChecksum(exportData),
-      };
 
-      // Step 3: Convert to JSON
+      final safeCopyPath = await _databaseService.createSafeCopy();
+
+      // Step 2: Move the copy to the backups directory with a timestamped name
       _progress = 0.6;
       notifyListeners();
-      
-      final jsonData = jsonEncode(backupData);
 
-      // Step 4: Save to file
-      _progress = 0.8;
-      notifyListeners();
-      
       final directory = await getApplicationDocumentsDirectory();
-      final backupDir = Directory('${directory.path}/backups');
+      final backupDir = Directory(path.join(directory.path, 'backups'));
       if (!await backupDir.exists()) {
         await backupDir.create(recursive: true);
       }
 
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final filePath = '${backupDir.path}/backup_$timestamp.json';
-      final file = File(filePath);
-      await file.writeAsString(jsonData);
+      final filePath = path.join(backupDir.path, 'backup_$timestamp.db');
 
-      // Step 5: Update last backup date
+      await File(safeCopyPath).copy(filePath);
+
+      // Clean up the temp copy
+      try {
+        await File(safeCopyPath).delete();
+      } catch (_) {}
+
+      // Step 3: Generate SHA-256 checksum and store alongside
+      _progress = 0.8;
+      notifyListeners();
+
+      final checksumValue = await _computeFileChecksum(filePath);
+      final checksumFile = File('$filePath.sha256');
+      await checksumFile.writeAsString(checksumValue);
+
+      // Step 4: Update last backup date
       _progress = 1.0;
       _lastBackupDate = DateTime.now().toIso8601String();
       await _secureStorage.write(key: _lastBackupKey, value: _lastBackupDate);
-      
+
       _isBackingUp = false;
       notifyListeners();
 
+      final file = File(filePath);
       return BackupResult(
         success: true,
         filePath: filePath,
@@ -131,7 +137,7 @@ class BackupService extends ChangeNotifier {
       _errorMessage = 'Backup failed: $e';
       _isBackingUp = false;
       notifyListeners();
-      
+
       return BackupResult(
         success: false,
         error: e.toString(),
@@ -139,19 +145,17 @@ class BackupService extends ChangeNotifier {
     }
   }
 
-  /// Share backup via WhatsApp
+  /// Share backup via any app (WhatsApp, email, etc.)
   Future<bool> shareViaWhatsApp() async {
     try {
-      // First create the backup
       final result = await createBackup();
-      
+
       if (!result.success || result.filePath == null) {
         _errorMessage = 'Failed to create backup for sharing';
         notifyListeners();
         return false;
       }
 
-      // Share the file
       await Share.shareXFiles(
         [XFile(result.filePath!)],
         text: 'Financial Manager Backup - ${_formatDateTime(result.timestamp!)}',
@@ -170,22 +174,24 @@ class BackupService extends ChangeNotifier {
   Future<BackupResult> exportToLocal() async {
     try {
       final result = await createBackup();
-      
+
       if (result.success) {
-        // Also copy to downloads folder if possible
         try {
           final externalDir = await getExternalStorageDirectory();
           if (externalDir != null) {
-            final downloadsPath = '${externalDir.path}/FinancialManager';
+            final downloadsPath = path.join(externalDir.path, 'FinancialManager');
             final downloadsDir = Directory(downloadsPath);
             if (!await downloadsDir.exists()) {
               await downloadsDir.create(recursive: true);
             }
-            
+
             final sourceFile = File(result.filePath!);
-            final destPath = '$downloadsPath/backup_${DateTime.now().millisecondsSinceEpoch}.json';
+            final destPath = path.join(
+              downloadsPath,
+              'backup_${DateTime.now().millisecondsSinceEpoch}.db',
+            );
             await sourceFile.copy(destPath);
-            
+
             return BackupResult(
               success: true,
               filePath: destPath,
@@ -194,13 +200,12 @@ class BackupService extends ChangeNotifier {
             );
           }
         } catch (e) {
-          // External storage not available, use internal
           if (kDebugMode) {
-            print('Could not save to external storage: $e');
+            debugPrint('Could not save to external storage: $e');
           }
         }
       }
-      
+
       return result;
     } catch (e) {
       _errorMessage = 'Export failed: $e';
@@ -209,12 +214,12 @@ class BackupService extends ChangeNotifier {
     }
   }
 
-  /// List available backup files
+  /// List available backup files (both .db and legacy .json)
   Future<List<BackupFile>> listBackups() async {
     try {
       final directory = await getApplicationDocumentsDirectory();
-      final backupDir = Directory('${directory.path}/backups');
-      
+      final backupDir = Directory(path.join(directory.path, 'backups'));
+
       if (!await backupDir.exists()) {
         return [];
       }
@@ -223,22 +228,27 @@ class BackupService extends ChangeNotifier {
       final backups = <BackupFile>[];
 
       for (final entity in files) {
-        if (entity is File && entity.path.endsWith('.json')) {
-          final stat = await entity.stat();
-          final name = entity.path.split('/').last;
-          
-          backups.add(BackupFile(
-            path: entity.path,
-            name: name,
-            createdAt: stat.modified,
-            sizeBytes: stat.size,
-          ));
+        if (entity is File) {
+          final ext = path.extension(entity.path).toLowerCase();
+          // Include .db backups and legacy .json backups
+          if (ext == '.db' || ext == '.json') {
+            final stat = await entity.stat();
+            final name = path.basename(entity.path);
+
+            backups.add(BackupFile(
+              path: entity.path,
+              name: name,
+              createdAt: stat.modified,
+              sizeBytes: stat.size,
+              isLegacyFormat: ext == '.json',
+            ));
+          }
         }
       }
 
       // Sort by date descending
       backups.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-      
+
       return backups;
     } catch (e) {
       _errorMessage = 'Failed to list backups: $e';
@@ -247,7 +257,11 @@ class BackupService extends ChangeNotifier {
     }
   }
 
-  /// Restore from a backup file
+  /// Restore from a backup file.
+  /// Supports .db files (current format) via DatabaseService.restoreFromFile().
+  /// Legacy .json files are NOT restorable (returns error with helpful message).
+  ///
+  /// On failure, check [errorMessage] for a user-friendly explanation.
   Future<bool> restoreFromFile(String filePath) async {
     _isRestoring = true;
     _progress = 0.0;
@@ -255,65 +269,79 @@ class BackupService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // Step 1: Read backup file
+      // Step 1: Validate the file exists
       _progress = 0.2;
       notifyListeners();
-      
+
       final file = File(filePath);
       if (!await file.exists()) {
         throw Exception('Backup file not found');
       }
 
-      final jsonData = await file.readAsString();
-      
-      // Step 2: Parse and validate backup
-      _progress = 0.4;
+      // Step 2: Check file type
+      _progress = 0.3;
       notifyListeners();
-      
-      final backupData = jsonDecode(jsonData) as Map<String, dynamic>;
-      
-      // Verify checksum
-      final data = backupData['data'];
-      final storedChecksum = backupData['checksum'];
-      final calculatedChecksum = _generateChecksum(data.toString());
-      
-      if (storedChecksum != calculatedChecksum) {
-        throw Exception('Backup file is corrupted');
+
+      final ext = path.extension(filePath).toLowerCase();
+      if (ext == '.json') {
+        throw Exception(
+          'This is a legacy JSON backup and cannot be restored. '
+          'Please use a .db backup or restore from Google Drive.',
+        );
       }
 
-      // Step 3: Restore data (TODO: Implement actual restore logic)
-      _progress = 0.8;
+      // Step 3: Verify SHA-256 checksum if available
+      _progress = 0.4;
       notifyListeners();
-      
-      // Note: Actual restore logic would need to:
-      // 1. Clear existing data
-      // 2. Insert customers
-      // 3. Insert loans
-      // 4. Insert payments
-      // This would require additional methods in DatabaseService
 
+      final checksumFile = File('$filePath.sha256');
+      if (await checksumFile.exists()) {
+        final storedChecksum = (await checksumFile.readAsString()).trim();
+        final actualChecksum = await _computeFileChecksum(filePath);
+        if (storedChecksum != actualChecksum) {
+          throw Exception('Backup file integrity check failed — file may be corrupted');
+        }
+      }
+
+      // Step 4: Restore via DatabaseService (handles migration from any version)
+      _progress = 0.6;
+      notifyListeners();
+
+      final success = await DatabaseService.instance.restoreFromFile(filePath);
+
+      if (!success) {
+        // Use the detailed error from DatabaseService when available
+        final detailedError = DatabaseService.instance.lastRestoreError;
+        throw Exception(detailedError ?? 'Database restore failed — file may be corrupted or incompatible');
+      }
+
+      // Step 5: Done
       _progress = 1.0;
       _isRestoring = false;
       notifyListeners();
-      
+
       return true;
     } catch (e) {
-      _errorMessage = 'Restore failed: $e';
+      _errorMessage = e.toString().replaceFirst('Exception: ', '');
       _isRestoring = false;
       notifyListeners();
       return false;
     }
   }
 
-  /// Delete a backup file
+  /// Delete a backup file and its checksum
   Future<bool> deleteBackup(String filePath) async {
     try {
       final file = File(filePath);
       if (await file.exists()) {
         await file.delete();
-        return true;
       }
-      return false;
+      // Also delete checksum file if exists
+      final checksumFile = File('$filePath.sha256');
+      if (await checksumFile.exists()) {
+        await checksumFile.delete();
+      }
+      return true;
     } catch (e) {
       _errorMessage = 'Failed to delete backup: $e';
       notifyListeners();
@@ -321,14 +349,12 @@ class BackupService extends ChangeNotifier {
     }
   }
 
-  /// Generate a simple checksum for data integrity
-  String _generateChecksum(String data) {
-    int hash = 0;
-    for (int i = 0; i < data.length; i++) {
-      hash = ((hash << 5) - hash) + data.codeUnitAt(i);
-      hash = hash & hash; // Convert to 32bit integer
-    }
-    return hash.toRadixString(16);
+  /// Compute SHA-256 checksum of a file
+  Future<String> _computeFileChecksum(String filePath) async {
+    final file = File(filePath);
+    final bytes = await file.readAsBytes();
+    final digest = sha256.convert(bytes);
+    return digest.toString();
   }
 
   /// Format datetime for display
@@ -338,8 +364,8 @@ class BackupService extends ChangeNotifier {
       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
     ];
     return '${dateTime.day} ${months[dateTime.month - 1]}, ${dateTime.year} '
-           '${dateTime.hour.toString().padLeft(2, '0')}:'
-           '${dateTime.minute.toString().padLeft(2, '0')}';
+        '${dateTime.hour.toString().padLeft(2, '0')}:'
+        '${dateTime.minute.toString().padLeft(2, '0')}';
   }
 }
 
@@ -366,12 +392,14 @@ class BackupFile {
   final String name;
   final DateTime createdAt;
   final int sizeBytes;
+  final bool isLegacyFormat;
 
   BackupFile({
     required this.path,
     required this.name,
     required this.createdAt,
     required this.sizeBytes,
+    this.isLegacyFormat = false,
   });
 
   String get formattedSize {
